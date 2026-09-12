@@ -68,6 +68,9 @@ pub struct Config {
     /// English subtitles when available (mpv ytdl subs).
     #[serde(default)]
     pub subtitles: bool,
+    /// Color scheme (Settings → Style). Names from the Omarchy theme list.
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 fn default_player() -> String {
@@ -93,6 +96,9 @@ fn default_quality() -> String {
 }
 fn default_thumb_mode() -> String {
     "auto".into()
+}
+fn default_theme() -> String {
+    "Midnight".into()
 }
 fn default_true() -> bool {
     true
@@ -123,6 +129,7 @@ impl Default for Config {
             thumb_mode: default_thumb_mode(),
             sponsorblock: true,
             subtitles: false,
+            theme: default_theme(),
         }
     }
 }
@@ -172,6 +179,7 @@ pub fn load() -> Config {
                 "\"thumb_quality\"",
                 "\"thumb_mode\"",
                 "\"sponsorblock\"",
+                "\"theme\"",
                 "\"feed_per_channel\"",
                 "\"cookies_file\"",
             ] {

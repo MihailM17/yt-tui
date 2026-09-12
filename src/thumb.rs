@@ -1,11 +1,9 @@
-use std::{fs, process::Command, time::Duration};
+use std::{fs, process::Command};
 
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
-
-use crate::config;
 
 // ---------------------------------------------------------------------------
 // Procedural fallback (offline, zero storage). Distinct hue per video.
@@ -100,12 +98,23 @@ pub fn quality_file(quality: &str) -> &'static str {
     }
 }
 
+/// Filename-safe id (belt and suspenders next to parse-time validation).
+fn safe_id(video_id: &str) -> String {
+    video_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect()
+}
+
 fn read_cached(video_id: &str, quality: &str) -> Option<Vec<u8>> {
     let dir = thumb_dir();
-    let path = dir.join(format!("{}-{}", video_id, quality_file(quality)));
+    let path = dir.join(format!("{}-{}", safe_id(video_id), quality_file(quality)));
     if let Ok(b) = fs::read(&path) {
         if !b.is_empty() {
-            let _ = file_touch(&path);
+            // NOTE: no mtime bump here on purpose — this runs per rendered
+            // thumb per frame; spawning `touch` 300x/sec was pure overhead.
+            // Disk LRU (creation order) is good enough at 20MB.
             return Some(b);
         }
     }
@@ -122,7 +131,7 @@ pub fn warm_all(ids: &[String], cache_mb: u64, quality: &str) {
     let missing: Vec<String> = ids
         .iter()
         .take(40)
-        .filter(|id| !id.starts_with("mock") && !dir.join(format!("{id}-{qf}")).exists())
+        .filter(|id| !id.starts_with("mock") && !dir.join(format!("{}-{qf}", safe_id(id))).exists())
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -145,7 +154,7 @@ pub fn warm_all(ids: &[String], cache_mb: u64, quality: &str) {
                     .output()
                 {
                     if out.status.success() && out.stdout.len() > 500 {
-                        let _ = fs::write(dir.join(format!("{id}-{qf}")), &out.stdout);
+                        let _ = fs::write(dir.join(format!("{}-{qf}", safe_id(&id))), &out.stdout);
                     }
                 }
             }
@@ -230,14 +239,6 @@ fn enforce_cap(dir: &std::path::Path, cap_mb: u64) {    let cap = cap_mb.max(5) 
     }
 }
 
-fn file_touch(p: &std::path::Path) -> std::io::Result<()> {
-    // cheap mtime bump: re-write mtime via filetime-less trick (read+write same len not needed).
-    // Use `touch` semantics via setting len (no-op if same).
-    let _ = Command::new("touch").arg(p).output();
-    let _ = Duration::from_secs(0);
-    let _ = config::cache_dir();
-    Ok(())
-}
 
 fn hash(seed: u64, x: u64, y: u64, w: u64) -> u64 {
     let mut h = seed.wrapping_add(0x9E3779B97F4A7C15).wrapping_add(x.wrapping_mul(0xBF58476D1CE4E5B9)).wrapping_add(y.wrapping_mul(0x94D049BB133111EB)).wrapping_add(w.wrapping_mul(0xD1B54A32846B4E87));

@@ -7,17 +7,13 @@ use ratatui::{
 };
 
 use crate::app::{App, Overlay, SidebarAction, TransportAction, View};
+use crate::theme::Theme;
 use ratatui_image::{Resize, StatefulImage};
 
-const BG: Color = Color::Rgb(10, 14, 22);
-const PANEL: Color = Color::Rgb(16, 22, 34);
-const ACCENT: Color = Color::Rgb(80, 160, 255);
-const DIM: Color = Color::Rgb(130, 150, 175);
-const CHIP_BG: Color = Color::Rgb(30, 40, 58);
-
 pub fn render(f: &mut Frame, app: &mut App) {
+    let th = app.theme();
     let area = f.area();
-    f.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    f.render_widget(Block::default().style(Style::default().bg(th.bg)), area);
 
     app.cols = if area.width >= 178 { 3 } else if area.width >= 128 { 2 } else { 1 };
 
@@ -87,9 +83,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     };
     let status = Paragraph::new(Line::from(vec![Span::styled(
         format!(" {status_txt}"),
-        Style::default().fg(DIM),
+        Style::default().fg(th.dim),
     )]))
-    .style(Style::default().bg(BG));
+    .style(Style::default().bg(th.bg));
     f.render_widget(status, outer[3]);
 
     if let Some(ov) = app.overlay.clone() {
@@ -110,6 +106,7 @@ fn past_status(app: &App) -> String {
 }
 
 fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -121,15 +118,15 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
     app.search_rect = chunks[1];
 
     let logo = Paragraph::new(vec![Line::from(vec![
-        Span::styled("☰ ", Style::default().fg(DIM)),
+        Span::styled("☰ ", Style::default().fg(th.dim)),
         Span::styled("▶ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
         Span::styled(
             "YouTube ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.fg).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("BG", Style::default().fg(DIM)),
+        Span::styled("@@th.bg@@", Style::default().fg(th.dim)),
     ])])
-    .block(block(""));
+    .block(block("", &th));
     f.render_widget(logo, chunks[0]);
 
     let (prompt, txt) = if app.adding_sub {
@@ -142,13 +139,13 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
         ("", app.query.clone())
     };
     let search = Paragraph::new(Line::from(vec![
-        Span::styled(prompt, Style::default().fg(ACCENT)),
+        Span::styled(prompt, Style::default().fg(th.accent)),
         Span::styled(
             txt,
             Style::default().fg(if app.query.is_empty() && !app.searching && !app.adding_sub {
-                DIM
+                th.dim
             } else {
-                Color::White
+                th.fg
             }),
         ),
     ]))
@@ -157,12 +154,12 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(
                 if app.searching || app.adding_sub {
-                    ACCENT
+                    th.accent
                 } else {
-                    DIM
+                    th.dim
                 },
             ))
-            .style(Style::default().bg(PANEL)),
+            .style(Style::default().bg(th.panel)),
     );
     f.render_widget(search, chunks[1]);
 
@@ -173,21 +170,22 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
     for (i, (glyph, act)) in [("⏸", TransportAction::Pause), ("⏭", TransportAction::Next)].iter().enumerate() {
         let r = Rect { x: tx + 1 + i as u16 * 4, y: ty, width: 3, height: 1 };
         app.transport_hits.push((r, *act));
-        f.render_widget(Paragraph::new(Span::styled(*glyph, Style::default().fg(ACCENT))), r);
+        f.render_widget(Paragraph::new(Span::styled(*glyph, Style::default().fg(th.accent))), r);
     }
     let gr = Rect { x: tx + 10, y: ty, width: 3, height: 1 };
     app.gear_rect = gr;
-    f.render_widget(Paragraph::new(Span::styled("⚙", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))), gr);
+    f.render_widget(Paragraph::new(Span::styled("⚙", Style::default().fg(th.fg).add_modifier(Modifier::BOLD))), gr);
     let right = Paragraph::new(Line::from(vec![
-        Span::styled("  + Create  ", Style::default().fg(Color::White)),
-        Span::styled(" 🔔  ", Style::default().fg(DIM)),
+        Span::styled("  + Create  ", Style::default().fg(th.fg)),
+        Span::styled(" 🔔  ", Style::default().fg(th.dim)),
         Span::styled(" ● ", Style::default().fg(Color::Yellow)),
     ]))
-    .block(block(""));
+    .block(block("", &th));
     f.render_widget(right, Rect { x: tx + 13, y: chunks[2].y, width: chunks[2].width.saturating_sub(13), height: chunks[2].height });
 }
 
 fn render_chips(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.chips_rect = area;
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, c) in app.chips.iter().enumerate() {
@@ -195,17 +193,18 @@ fn render_chips(f: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled(
             format!(" {c} "),
             Style::default()
-                .fg(if active { Color::Black } else { Color::White })
-                .bg(if active { ACCENT } else { CHIP_BG })
+                .fg(if active { Color::Black } else { th.fg })
+                .bg(if active { th.accent } else { th.chip })
                 .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
         ));
         spans.push(Span::raw(" "));
     }
-    let p = Paragraph::new(Line::from(spans)).block(block(""));
+    let p = Paragraph::new(Line::from(spans)).block(block("", &th));
     f.render_widget(p, area);
 }
 
 fn render_view_bar(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.chips_rect = Rect::default();
     let title = match app.view {
         View::Subs => "Subscriptions — Enter load • a add • d remove • r refresh all",
@@ -213,12 +212,13 @@ fn render_view_bar(f: &mut Frame, app: &mut App, area: Rect) {
         _ => "",
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(title, Style::default().fg(DIM)))).block(block("")),
+        Paragraph::new(Line::from(Span::styled(title, Style::default().fg(th.dim)))).block(block("", &th)),
         area,
     );
 }
 
 fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.sidebar_hits.clear();
     // every row below is clickable now (Later/Liked/Login are actions, not views)
     let rows: Vec<(&str, Option<SidebarAction>)> = vec![
@@ -241,7 +241,7 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if label.is_empty() {
             lines.push(Line::from(Span::styled(
                 "────────────────────",
-                Style::default().fg(DIM),
+                Style::default().fg(th.dim),
             )));
             y += 1;
             continue;
@@ -249,7 +249,7 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let active = view
             .map(|a| matches!(a, SidebarAction::Go(v) if v == app.view))
             .unwrap_or(false);
-        lines.push(menu_line(label, active));
+        lines.push(menu_line(label, active, &th));
         if let Some(a) = view {
             app.sidebar_hits.push((
                 Rect {
@@ -267,15 +267,15 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.chan_hits.clear();
     lines.push(Line::from(Span::styled(
         "────────────────────",
-        Style::default().fg(DIM),
+        Style::default().fg(th.dim),
     )));
     let mut cy = area.y + lines.len() as u16;
     for (name, fresh) in app.subs.iter() {
         let dot = if *fresh { " •" } else { "" };
         lines.push(Line::from(vec![
             Span::styled("◉ ", Style::default().fg(Color::Red)),
-            Span::styled(name.clone(), Style::default().fg(Color::White)),
-            Span::styled(dot, Style::default().fg(ACCENT)),
+            Span::styled(name.clone(), Style::default().fg(th.fg)),
+            Span::styled(dot, Style::default().fg(th.accent)),
         ]));
         if cy < area.y + area.height {
             app.chan_hits.push((
@@ -289,18 +289,18 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let p = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(Color::Rgb(40, 60, 90)))
-            .style(Style::default().bg(BG)),
+            .border_style(Style::default().fg(th.border))
+            .style(Style::default().bg(th.bg)),
     );
     f.render_widget(p, area);
 }
 
-fn menu_line(label: &str, active: bool) -> Line<'static> {
+fn menu_line(label: &str, active: bool, th: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         format!(" {label} "),
         Style::default()
-            .fg(if active { Color::White } else { DIM })
-            .bg(if active { Color::Rgb(30, 50, 85) } else { BG })
+            .fg(if active { th.fg } else { th.dim })
+            .bg(if active { th.sel } else { th.bg })
             .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
     ))
 }
@@ -347,13 +347,14 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
 
 
 fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.card_hits.clear();
     app.list_hits.clear();
     let mut lines: Vec<Line> = vec![];
     if app.hist.is_empty() {
         lines.push(Line::from(Span::styled(
             "Empty — play a video from Home and it lands here (local only)",
-            Style::default().fg(DIM),
+            Style::default().fg(th.dim),
         )));
     }
     for (i, e) in app.hist.iter().enumerate().take(area.height as usize - 3) {
@@ -373,38 +374,39 @@ fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!("{} {}{}", if sel { "▶" } else { " " }, truncate(&e.title, 70), ch),
             Style::default()
-                .fg(if sel { Color::White } else { DIM })
+                .fg(if sel { th.fg } else { th.dim })
                 .bg(if sel {
-                    Color::Rgb(30, 50, 85)
+                    th.sel
                 } else {
-                    BG
+                    th.bg
                 }),
         )));
     }
     lines.push(Line::from(Span::raw("")));
     lines.push(Line::from(Span::styled(
         "Enter replay • D clear history",
-        Style::default().fg(DIM),
+        Style::default().fg(th.dim),
     )));
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("History")
-                .style(Style::default().bg(BG)),
+                .style(Style::default().bg(th.bg)),
         ),
         area,
     );
 }
 
 fn render_playlists(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.card_hits.clear();
     app.list_hits.clear();
     let mut lines: Vec<Line> = vec![];
     if app.pl_names.is_empty() {
         lines.push(Line::from(Span::styled(
             "No playlists — hover videos in Home, a adds to queue, then s here saves it",
-            Style::default().fg(DIM),
+            Style::default().fg(th.dim),
         )));
     }
     for (i, name) in app.pl_names.iter().enumerate() {
@@ -416,27 +418,28 @@ fn render_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!("{} {name}", if sel { "▶" } else { " ♫" }),
             Style::default()
-                .fg(if sel { Color::White } else { DIM })
-                .bg(if sel { Color::Rgb(30, 50, 85) } else { BG })
+                .fg(if sel { th.fg } else { th.dim })
+                .bg(if sel { th.sel } else { th.bg })
                 .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
         )));
     }
     lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled("Enter open in Home • s save queue • d delete", Style::default().fg(DIM))));
+    lines.push(Line::from(Span::styled("Enter open in Home • s save queue • d delete", Style::default().fg(th.dim))));
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Playlists").style(Style::default().bg(BG))),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Playlists").style(Style::default().bg(th.bg))),
         area,
     );
 }
 
 fn render_downloads(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.theme();
     app.card_hits.clear();
     app.list_hits.clear();
     let mut lines: Vec<Line> = vec![];
     if app.dl_files.is_empty() {
         lines.push(Line::from(Span::styled(
             "Empty — d on a Home video downloads it here",
-            Style::default().fg(DIM),
+            Style::default().fg(th.dim),
         )));
     }
     for (i, (_, name)) in app.dl_files.iter().enumerate() {
@@ -448,35 +451,36 @@ fn render_downloads(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!("{} {name}", if sel { "▶" } else { " ⬇" }),
             Style::default()
-                .fg(if sel { Color::White } else { DIM })
-                .bg(if sel { Color::Rgb(30, 50, 85) } else { BG })
+                .fg(if sel { th.fg } else { th.dim })
+                .bg(if sel { th.sel } else { th.bg })
                 .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
         )));
     }
     lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled("Enter play • d delete file", Style::default().fg(DIM))));
+    lines.push(Line::from(Span::styled("Enter play • d delete file", Style::default().fg(th.dim))));
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Downloads").style(Style::default().bg(BG))),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Downloads").style(Style::default().bg(th.bg))),
         area,
     );
 }
 
 fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selected: bool) {
+    let pal = app.theme();
     if area.height < 10 || area.width < 20 {
         return;
     }
     let hovered = app.hover.map(|(hx, hy)| inside(area, hx, hy)).unwrap_or(false);
     let border_col = if selected {
-        ACCENT
+        pal.accent
     } else if hovered {
         Color::Rgb(120, 170, 220)
     } else {
-        Color::Rgb(45, 70, 100)
+        pal.border
     };
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_col))
-        .style(Style::default().bg(BG));
+        .style(Style::default().bg(pal.bg));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
@@ -510,7 +514,7 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
             height: 1,
         };
         f.render_widget(
-            Paragraph::new(dur).style(Style::default().bg(Color::Black).fg(Color::White)),
+            Paragraph::new(dur).style(Style::default().bg(Color::Black).fg(pal.fg)),
             r,
         );
     }
@@ -527,24 +531,25 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
             Span::styled("◉ ", Style::default().fg(Color::Red)),
             Span::styled(
                 truncate(&v.title, (info_area.width as usize).saturating_sub(6)),
-                Style::default().fg(Color::White).add_modifier(if selected {
+                Style::default().fg(pal.fg).add_modifier(if selected {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 }),
             ),
-            Span::styled(" ⋮", Style::default().fg(DIM)),
+            Span::styled(" ⋮", Style::default().fg(pal.dim)),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{}{}", v.channel, check), Style::default().fg(DIM)),
+            Span::styled(format!("{}{}", v.channel, check), Style::default().fg(pal.dim)),
         ]),
-        Line::from(vec![Span::raw("  "), Span::styled(meta, Style::default().fg(DIM))]),
+        Line::from(vec![Span::raw("  "), Span::styled(meta, Style::default().fg(pal.dim))]),
     ];
     f.render_widget(Paragraph::new(info), info_area);
 }
 
 fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
+    let th = app.theme();
     let w = (area.width * 3 / 4).clamp(40, 110);
     let h = (area.height * 3 / 4).clamp(12, 40);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -554,14 +559,14 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
     // clickable close button (also Esc/q)
     let xr = Rect { x: x + w.saturating_sub(5), y, width: 4, height: 1 };
     app.close_rect = xr;
-    f.render_widget(Paragraph::new(Span::styled(" ✕ ", Style::default().fg(Color::White).bg(Color::Rgb(150, 50, 50)).add_modifier(Modifier::BOLD))), xr);
+    f.render_widget(Paragraph::new(Span::styled(" ✕ ", Style::default().fg(th.fg).bg(Color::Rgb(150, 50, 50)).add_modifier(Modifier::BOLD))), xr);
     let (title, lines): (String, Vec<Line>) = match ov {
         Overlay::Info { vid: _, info, related } => {
             // related rows clickable via settings_hits (cleared per overlay)
             app.settings_hits.clear();
             let mut l = vec![
-                Line::from(Span::styled(info.title.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
-                Line::from(Span::styled(format!("{} • {} • {} • {} • ♥ {}", info.channel, info.views, info.date, info.duration, info.likes), Style::default().fg(ACCENT))),
+                Line::from(Span::styled(info.title.clone(), Style::default().fg(th.fg).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(format!("{} • {} • {} • {} • ♥ {}", info.channel, info.views, info.date, info.duration, info.likes), Style::default().fg(th.accent))),
                 Line::from(Span::raw("")),
             ];
             for para in info.desc.split("
@@ -569,25 +574,25 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
 ").take(30) {
                 let p: String = para.split_whitespace().collect::<Vec<_>>().join(" ");
                 if p.is_empty() { continue; }
-                l.push(Line::from(Span::styled(p, Style::default().fg(Color::White))));
+                l.push(Line::from(Span::styled(p, Style::default().fg(th.fg))));
                 l.push(Line::from(Span::raw("")));
             }
             if !info.chapters.is_empty() {
-                l.push(Line::from(Span::styled("Chapters:", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+                l.push(Line::from(Span::styled("Chapters:", Style::default().fg(th.accent).add_modifier(Modifier::BOLD))));
                 for (ts, name) in &info.chapters {
-                    l.push(Line::from(Span::styled(format!("  {ts}  {name}"), Style::default().fg(DIM))));
+                    l.push(Line::from(Span::styled(format!("  {ts}  {name}"), Style::default().fg(th.dim))));
                 }
             }
             app.info_hits.clear();
             if !related.is_empty() {
                 l.push(Line::from(Span::raw("")));
-                l.push(Line::from(Span::styled("More from this channel (click/1-9):", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+                l.push(Line::from(Span::styled("More from this channel (click/1-9):", Style::default().fg(th.accent).add_modifier(Modifier::BOLD))));
                 let first_row = l.len();
                 for (k, rv) in related.iter().take(9).enumerate() {
                     l.push(Line::from(vec![
-                        Span::styled(format!("{} ", k + 1), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                        Span::styled(truncate(&rv.title, 60), Style::default().fg(Color::White)),
-                        Span::styled(format!("  {}", rv.duration), Style::default().fg(DIM)),
+                        Span::styled(format!("{} ", k + 1), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
+                        Span::styled(truncate(&rv.title, 60), Style::default().fg(th.fg)),
+                        Span::styled(format!("  {}", rv.duration), Style::default().fg(th.dim)),
                     ]));
                     // screen row of this line, scroll-aware
                     let sy = (first_row + k) as i32 - app.overlay_scroll as i32;
@@ -602,13 +607,13 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
             ("Info  (j/k scroll • 1-9 plays related • Esc close)".into(), l)
         }
         Overlay::Comments { vid: _, items } => {
-            let mut l = vec![Line::from(Span::styled(format!("{} comments", items.len()), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))];
+            let mut l = vec![Line::from(Span::styled(format!("{} comments", items.len()), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)))];
             for c in items {
                 l.push(Line::from(vec![
-                    Span::styled(c.author.clone() + " ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                    Span::styled(if c.likes.is_empty() { String::new() } else { format!("♥{} ", c.likes) }, Style::default().fg(DIM)),
+                    Span::styled(c.author.clone() + " ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(if c.likes.is_empty() { String::new() } else { format!("♥{} ", c.likes) }, Style::default().fg(th.dim)),
                 ]));
-                l.push(Line::from(Span::styled(c.text.clone(), Style::default().fg(Color::White))));
+                l.push(Line::from(Span::styled(c.text.clone(), Style::default().fg(th.fg))));
                 l.push(Line::from(Span::raw("")));
             }
             ("Comments  (j/k scroll • Esc close)".into(), l)
@@ -623,16 +628,16 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
                 if rr.y < rect.y + rect.height.saturating_sub(2) {
                     app.settings_hits.push((rr, i));
                 }
-                let val_style = if value == "→" { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) }
+                let val_style = if value == "→" { Style::default().fg(th.accent).add_modifier(Modifier::BOLD) }
                     else { Style::default().fg(Color::Rgb(150, 220, 150)) };
                 l.push(Line::from(vec![
-                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { Color::White } else { DIM })),
-                    Span::styled(format!("{label:<18}"), Style::default().fg(if sel { Color::White } else { DIM }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { th.fg } else { th.dim })),
+                    Span::styled(format!("{label:<18}"), Style::default().fg(if sel { th.fg } else { th.dim }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
                     Span::styled(value.clone(), val_style),
                 ]));
             }
             l.push(Line::from(Span::raw("")));
-            l.push(Line::from(Span::styled("Enter/click changes • saved to config.json", Style::default().fg(DIM))));
+            l.push(Line::from(Span::styled("Enter/click changes • saved to config.json", Style::default().fg(th.dim))));
             ("Settings  (click or j/k + Enter • Esc closes)".into(), l)
         }
         Overlay::Actions { .. } => {
@@ -646,25 +651,25 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
                     app.settings_hits.push((rr, i));
                 }
                 l.push(Line::from(vec![
-                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { Color::White } else { DIM })),
-                    Span::styled(format!("{label:<24}"), Style::default().fg(if sel { Color::White } else { DIM }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
-                    Span::styled(value.clone(), Style::default().fg(ACCENT)),
+                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { th.fg } else { th.dim })),
+                    Span::styled(format!("{label:<24}"), Style::default().fg(if sel { th.fg } else { th.dim }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                    Span::styled(value.clone(), Style::default().fg(th.accent)),
                 ]));
             }
             l.push(Line::from(Span::raw("")));
-            l.push(Line::from(Span::styled("Enter/click runs • account rows need cookies.txt", Style::default().fg(DIM))));
+            l.push(Line::from(Span::styled("Enter/click runs • account rows need cookies.txt", Style::default().fg(th.dim))));
             ("Actions  (x or right-click • Esc closes)".into(), l)
         }
         Overlay::Queue => {
             let mut l = vec![];
             if app.queue.is_empty() {
-                l.push(Line::from(Span::styled("Empty — hover a video in Home, press a to add", Style::default().fg(DIM))));
+                l.push(Line::from(Span::styled("Empty — hover a video in Home, press a to add", Style::default().fg(th.dim))));
             }
             for (i, v) in app.queue.iter().enumerate() {
-                l.push(Line::from(Span::styled(format!("{}. {} — {}", i + 1, v.title, v.channel), Style::default().fg(Color::White))));
+                l.push(Line::from(Span::styled(format!("{}. {} — {}", i + 1, v.title, v.channel), Style::default().fg(th.fg))));
             }
             l.push(Line::from(Span::raw("")));
-            l.push(Line::from(Span::styled("Enter plays all in mpv (autoplay-next)", Style::default().fg(ACCENT))));
+            l.push(Line::from(Span::styled("Enter plays all in mpv (autoplay-next)", Style::default().fg(th.accent))));
             ("Queue  (Enter play • Esc close)".into(), l)
         }
         Overlay::Help => {
@@ -683,7 +688,7 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
             ];
             // (label, desc) pairs rendered simply
             let mut l = vec![];
-            for (k, d) in rows { l.push(Line::from(vec![Span::styled(format!("{k:8}"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(d, Style::default().fg(Color::White))])); }
+            for (k, d) in rows { l.push(Line::from(vec![Span::styled(format!("{k:8}"), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(d, Style::default().fg(th.fg))])); }
             let _ = &rows;
             ("Help  (? or Esc close)".into(), l)
         }
@@ -694,7 +699,7 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
     let s = (scroll as usize).min(max_scroll);
     let visible: Vec<Line> = lines.into_iter().skip(s).take(inner_h).collect();
     f.render_widget(
-        Paragraph::new(visible).block(Block::default().borders(Borders::ALL).title(title.as_str()).style(Style::default().bg(Color::Rgb(14, 19, 30)))),
+        Paragraph::new(visible).block(Block::default().borders(Borders::ALL).title(title.as_str()).style(Style::default().bg(th.panel))),
         rect,
     );
 }
@@ -714,6 +719,6 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
-fn block(title: &str) -> Block<'_> {
-    Block::default().title(title).style(Style::default().bg(BG))
+fn block<'a>(title: &'a str, th: &Theme) -> Block<'a> {
+    Block::default().title(title).style(Style::default().bg(th.bg))
 }

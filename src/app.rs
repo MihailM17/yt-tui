@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use ratatui::{layout::Rect, text::Line};
 
-use crate::{config, data, engage, player, thumb, youtube};
+use crate::{config, data, engage, player, theme, thumb, youtube};
 use crate::youtube::{SortMode, VideoInfo, Comment};
 use ratatui_image::{picker::{Picker, ProtocolType}, protocol::StatefulProtocol};
 
@@ -234,6 +234,10 @@ impl App {
                 Some(ProtocolType::Kitty) | Some(ProtocolType::Sixel) | Some(ProtocolType::Iterm2)
             ),
         }
+    }
+
+    pub fn theme(&self) -> theme::Theme {
+        theme::get(&self.cfg.theme)
     }
 
     pub fn gfx_label(&self) -> String {
@@ -1785,6 +1789,7 @@ impl App {
             ("Stream quality".into(), self.cfg.quality.clone()),
             ("Thumbnails".into(), format!("{} ({})", self.cfg.thumb_mode, self.gfx_label())),
             ("Thumb detail".into(), self.cfg.thumb_quality.clone()),
+            ("Style".into(), self.cfg.theme.clone()),
             ("Cookie browser".into(), self.cfg.browser.clone()),
             ("Use cookies".into(), onoff(self.cfg.use_cookies)),
             ("Cookies file".into(), if self.cfg.cookies_file.is_empty() { "not set".into() } else { self.cfg.cookies_file.clone() }),
@@ -1824,27 +1829,30 @@ impl App {
                 self.img_protos.clear();
             }
             4 => {
+                self.cfg.theme = theme::next(&self.cfg.theme);
+            }
+            5 => {
                 self.cfg.browser = match self.cfg.browser.as_str() {
                     "chrome" => "firefox".into(), "firefox" => "zen".into(),
                     "zen" => "brave".into(), "brave" => "edge".into(), _ => "chrome".into(),
                 };
             }
-            5 => { self.cfg.use_cookies = !self.cfg.use_cookies; }
-            6 => {
+            6 => { self.cfg.use_cookies = !self.cfg.use_cookies; }
+            7 => {
                 // cycle cookies file: unset → default path → unset
                 self.cfg.cookies_file = if self.cfg.cookies_file.is_empty() {
                     "~/.config/yt-tui/cookies.txt".into()
                 } else { String::new() };
             }
-            7 => { self.cfg.feed_per_channel = match self.cfg.feed_per_channel { 3 => 5, 5 => 8, _ => 3 }; }
-            8 => { self.cfg.feed_total = match self.cfg.feed_total { 20 => 40, 40 => 80, _ => 20 }; }
-            9 => { self.cfg.search_limit = match self.cfg.search_limit { 12 => 24, 24 => 36, _ => 12 }; }
-            10 => {}
-            11 => { self.cfg.sponsorblock = !self.cfg.sponsorblock; }
-            12 => { self.cfg.subtitles = !self.cfg.subtitles; }
-            13 => { self.test_login(); config::save(&self.cfg); return; }
-            14 => { self.import_subs(); config::save(&self.cfg); return; }
-            15 => {
+            8 => { self.cfg.feed_per_channel = match self.cfg.feed_per_channel { 3 => 5, 5 => 8, _ => 3 }; }
+            9 => { self.cfg.feed_total = match self.cfg.feed_total { 20 => 40, 40 => 80, _ => 20 }; }
+            10 => { self.cfg.search_limit = match self.cfg.search_limit { 12 => 24, 24 => 36, _ => 12 }; }
+            11 => {}
+            12 => { self.cfg.sponsorblock = !self.cfg.sponsorblock; }
+            13 => { self.cfg.subtitles = !self.cfg.subtitles; }
+            14 => { self.test_login(); config::save(&self.cfg); return; }
+            15 => { self.import_subs(); config::save(&self.cfg); return; }
+            16 => {
                 let _ = std::fs::remove_dir_all(thumb::thumb_dir());
                 self.img_protos.clear();
                 self.thumb_cache.clear();

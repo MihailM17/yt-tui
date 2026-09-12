@@ -339,6 +339,11 @@ pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
         if id.is_empty() || title == "[Private video]" || title == "[Deleted video]" {
             continue;
         }
+        // defense in depth: ids flow into URLs, filenames and player args.
+        // Real YouTube ids are [A-Za-z0-9_-]; drop anything else.
+        if id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            continue;
+        }
         let seed: u64 = id.bytes().fold(0xcbf29ce484222325, |a, b| {
             a.wrapping_mul(0x100000001b3).wrapping_add(b as u64)
         });

@@ -33,7 +33,7 @@ Deps at runtime for playback (wired in `src/player.rs`):
 - `d/D` download video/mp3 • `v` quality • `C` subtitles • `z` sleep timer • `[/]` speed • `?` help
 - Single player window + open debounce • resume positions • SponsorBlock skip (toggle in Settings)
 - `0/s/y` views • `u` login • `w/t` later/liked • `r` refresh (auto on launch) • `+` more
-- `⚙`/`,` Settings: player, quality, thumbs, browser, cookies, feeds — click/Enter, persists
+- `⚙`/`,` Settings: player, quality, thumbs, Style (11 Omarchy themes), browser, cookies, feeds — click/Enter, persists
 - `i` info+chapters • `c` comments • `f` sort (relevance/views/longest/shortest)
 - `a/Q/P` queue add / view / play-all (autoplay) • `d/D` download video / mp3
 - `x`/right-click action menu: ♥ like, remove rating, 👎 dislike, save to Watch Later, subscribe (needs cookies.txt)
@@ -80,6 +80,14 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 - `"iina"` — macOS native, prettiest on Mac. `brew install --cask iina`.
 - `"vlc"` — familiar GUI, heavier.
 - `"browser"` — stock YouTube (ads return).
+
+## Security notes
+
+- No shell anywhere: every helper (`yt-dlp`, `curl`, `mpv`) is spawned with argv arrays, so search text and titles can't inject commands.
+- Video IDs are validated at parse (`[A-Za-z0-9_-]`, ≤64 chars) and thumb filenames sanitized — a hostile feed can't write outside the cache dir.
+- Titles render as plain ratatui spans (no terminal-escape interpretation); images go over base64 graphics protocols.
+- Session cookies live only in your exported `cookies.txt` (chmod 600 it); history/resume store ids+titles, nothing secret.
+- Crates are pinned in Cargo.lock; `cargo audit` clean at last check.
 
 ## Efficient by design (low RAM/storage)
 
