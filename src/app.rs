@@ -26,6 +26,12 @@ pub struct Video {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Home,
+    Subs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Home,
     Subs,
@@ -68,7 +74,6 @@ pub struct App {
     pub chips: Vec<String>,
     pub active_chip: usize,
     pub subs: Vec<(String, bool)>,
-    pub sub_selected: usize,
     pub pl_names: Vec<String>,
     pub pl_sel: usize,
     pub adding_pl: bool,
@@ -86,7 +91,9 @@ pub struct App {
     pub live: bool,
     pub login_ok: Option<bool>,
     pub cfg: config::Config,
-    rx: Option<Receiver<Result<Vec<Video>, String>>>,
+    rx: Option<Receiver<(Page, Result<Vec<Video>, String>)>>,
+    pages: HashMap<String, Vec<Video>>,
+    pre_search: Option<(View, Vec<Video>, bool)>,
     rx_auth: Option<Receiver<Result<String, String>>>,
     thumb_cache: HashMap<String, Vec<Line<'static>>>,
     thumb_order: VecDeque<String>,
@@ -95,6 +102,7 @@ pub struct App {
     pub chips_rect: Rect,
     pub card_hits: Vec<(Rect, usize)>,
     pub sidebar_hits: Vec<(Rect, SidebarAction)>,
+    pub chan_hits: Vec<(Rect, String)>,
     pub list_hits: Vec<(Rect, usize)>,
     pub overlay: Option<Overlay>,
     pub overlay_scroll: usize,
@@ -145,7 +153,7 @@ impl App {
         if !mpv_ok {
             status.push_str(" • mpv missing");
         }
-        let mut app = Self {
+        let app = Self {
             view: View::Home,
             videos,
             filtered,
@@ -155,7 +163,6 @@ impl App {
             chips: data::chips(),
             active_chip: 0,
             subs,
-            sub_selected: 0,
             pl_names: vec![],
             pl_sel: 0,
             adding_pl: false,
@@ -174,6 +181,8 @@ impl App {
             login_ok: None,
             cfg,
             rx: None,
+            pages: HashMap::new(),
+            pre_search: None,
             rx_auth: None,
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
@@ -181,6 +190,7 @@ impl App {
             chips_rect: Rect::default(),
             card_hits: vec![],
             sidebar_hits: vec![],
+            chan_hits: vec![],
             list_hits: vec![],
             overlay: None,
             overlay_scroll: 0,
@@ -211,7 +221,6 @@ impl App {
             sleep_until: None,
         };
         // instant startup: show last feed from disk (<15min old), bg refresh anyway
-        app.load_cached_feed();
         app
     }
 
@@ -259,21 +268,27 @@ impl App {
     // ---------------- views ----------------
 
     pub fn set_view(&mut self, v: View) {
-        self.view = v;
-        self.status = match v {
-            View::Home => "home — / search • r feed • Enter play".into(),
-            View::Subs => "subs — Enter load channel • a add • d remove • r refresh all".into(),
-            View::Playlists => {
-                self.reload_playlists();
-                "playlists — Enter open • s save queue • d delete".into()
-            }
-            View::Downloads => {
-                self.reload_downloads();
-                "downloads — Enter play • d delete file".into()
-            }
-            View::History => {
-                self.reload_hist();
-                "history — Enter replay • D clear • local only, no login needed".into()
+        // Home/Subs go through the page system (memory → disk → network);
+        // anything else renders instantly from local state.
+        match v {
+            View::Home | View::Subs => self.enter_view(v),
+            _ => {
+                self.view = v;
+                self.status = match v {
+                    View::Playlists => {
+                        self.reload_playlists();
+                        "playlists — Enter open • s save queue • d delete".into()
+                    }
+                    View::Downloads => {
+                        self.reload_downloads();
+                        "downloads — Enter play • d delete file".into()
+                    }
+                    View::History => {
+                        self.reload_hist();
+                        "history — Enter replay • D clear • local only, no login needed".into()
+                    }
+                    View::Home | View::Subs => unreachable!(),
+                };
             }
         };
     }
@@ -411,15 +426,20 @@ impl App {
     // ---------------- background poll ----------------
 
     /// Non-blocking poll for background fetch results. Call each frame.
+    /// Tagged jobs land on their own page (no more results flipping views).
     pub fn poll(&mut self) {
         if let Some(rx) = &self.rx {
             let done = match rx.try_recv() {
-                Ok(Ok(vids)) => {
+                Ok((page, Ok(vids))) => {
                     self.loading = false;
                     if vids.is_empty() {
                         self.status = "no results (try another query)".into();
                     } else {
-                        self.view = View::Home;
+                        self.view = match page {
+                            Page::Home => View::Home,
+                            Page::Subs => View::Subs,
+                        };
+                        self.pages.insert(page_key(page), vids.clone());
                         self.videos = vids;
                         self.filtered = (0..self.videos.len()).collect();
                         self.selected = 0;
@@ -427,10 +447,16 @@ impl App {
                         self.live = true;
                         self.thumb_cache.clear();
                         self.thumb_order.clear();
-                        self.status = format!(
-                            "{} results • j/k or wheel scrolls (3 rows visible) • Enter plays",
-                            self.videos.len()
-                        );
+                        self.status = match page {
+                            Page::Home => format!(
+                                "{} home videos • search with / • r refreshes",
+                                self.videos.len()
+                            ),
+                            Page::Subs => format!(
+                                "{} latest from subs • r refreshes • a adds a channel",
+                                self.videos.len()
+                            ),
+                        };
                         // warm jpg cache in background so thumbs pop in without render jank
                         let ids: Vec<String> =
                             self.videos.iter().map(|v| v.id.clone()).collect();
@@ -440,7 +466,7 @@ impl App {
                     }
                     true
                 }
-                Ok(Err(e)) => {
+                Ok((_, Err(e))) => {
                     self.loading = false;
                     self.status = format!("fetch failed: {e}");
                     true
@@ -614,7 +640,7 @@ impl App {
     /// click sidebar to switch views, wheel to scroll.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         // right-click a card = action menu (like, subscribe, save…)
-        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Right)) && self.view == View::Home {
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Right)) && (self.view == View::Home || self.view == View::Subs) {
             for (rect, idx) in self.card_hits.clone() {
                 if inside(rect, ev.column, ev.row) {
                     self.selected = idx;
@@ -683,7 +709,7 @@ impl App {
                 for (rect, a) in self.sidebar_hits.clone() {
                     if inside(rect, x, y) {
                         match a {
-                            SidebarAction::Go(v) => self.set_view(v),
+                            SidebarAction::Go(v) => self.enter_view(v),
                             SidebarAction::Later => self.load_private("later"),
                             SidebarAction::Liked => self.load_private("liked"),
                             SidebarAction::Login => self.test_login(),
@@ -691,13 +717,19 @@ impl App {
                         return;
                     }
                 }
-                if self.view == View::Home {
+                for (rect, name) in self.chan_hits.clone() {
+                    if inside(rect, x, y) {
+                        self.load_channel(&name);
+                        return;
+                    }
+                }
+                if self.view == View::Home || self.view == View::Subs {
                     if inside(self.chips_rect, x, y) {
                         let w = self.chips_rect.width.max(1) as usize;
                         let rel = x.saturating_sub(self.chips_rect.x) as usize;
                         let i = rel * self.chips.len() / w;
                         self.active_chip = i.min(self.chips.len() - 1);
-                        self.status = format!("filter: {}", self.chips[self.active_chip]);
+                        self.apply_chip();
                         return;
                     }
                     for (rect, idx) in self.card_hits.clone() {
@@ -714,10 +746,6 @@ impl App {
                     for (rect, idx) in self.list_hits.clone() {
                         if inside(rect, x, y) {
                             match self.view {
-                                View::Subs => {
-                                    self.sub_selected = idx;
-                                    self.load_selected_sub();
-                                }
                                 View::Playlists => {
                                     if self.pl_sel == idx {
                                         self.open_playlist();
@@ -745,15 +773,13 @@ impl App {
             }
             MouseEventKind::Moved => { self.hover = Some((ev.column, ev.row)); }
             MouseEventKind::ScrollUp => match self.view {
-                View::Home => self.move_sel(-(self.cols as isize)),
-                View::Subs => self.move_sub(-1),
+                View::Home | View::Subs => self.move_sel(-(self.cols as isize)),
                 View::Playlists => self.move_pl(-1),
                 View::Downloads => self.move_dl(-1),
                 View::History => self.move_hist(-1),
             },
             MouseEventKind::ScrollDown => match self.view {
-                View::Home => self.move_sel(self.cols as isize),
-                View::Subs => self.move_sub(1),
+                View::Home | View::Subs => self.move_sel(self.cols as isize),
                 View::Playlists => self.move_pl(1),
                 View::Downloads => self.move_dl(1),
                 View::History => self.move_hist(1),
@@ -892,7 +918,7 @@ impl App {
             // views — lowercase aliases (no Shift needed). hjkl stay nav-only.
             // s subs, y history (You), u login (aUth), w watch-later, t liked.
             // Uppercase S/H/L/W/T kept for compat.
-            KeyCode::Char('0') => self.set_view(View::Home),
+            KeyCode::Char('0') => self.enter_view(View::Home),
             KeyCode::Char(';') => self.set_view(View::Playlists),
             KeyCode::Char('b') => self.set_view(View::Downloads),
             KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -905,7 +931,7 @@ impl App {
                         self.status = "playlist name: type + Enter".into();
                     }
                 } else {
-                    self.set_view(View::Subs);
+                    self.enter_view(View::Subs);
                 }
             }
             KeyCode::Char('y') | KeyCode::Char('H') => self.set_view(View::History),
@@ -917,15 +943,9 @@ impl App {
             KeyCode::Char('/') => {
                 self.searching = true;
             }
-            KeyCode::Char('r') => {
-                if self.view == View::Subs {
-                    self.load_feed();
-                } else {
-                    self.set_view(View::Home);
-                    self.load_feed();
-                }
-            }
+            KeyCode::Char('r') => self.refresh_current(),
             KeyCode::Char('m') => {
+                self.pre_search = None;
                 self.view = View::Home;
                 self.videos = data::mock_videos();
                 self.filtered = (0..self.videos.len()).collect();
@@ -941,14 +961,24 @@ impl App {
                 if !self.query.is_empty() {
                     self.query.clear();
                     self.apply_filter();
+                } else if let Some((v, vids, live)) = self.pre_search.take() {
+                    // back from search to the exact page you left
+                    self.view = v;
+                    self.videos = vids;
+                    self.filtered = (0..self.videos.len()).collect();
+                    self.selected = 0;
+                    self.row_offset = 0;
+                    self.live = live;
+                    self.thumb_cache.clear();
+                    self.thumb_order.clear();
+                    self.status = "back — Esc cleared the search".into();
                 } else if self.view != View::Home {
-                    self.set_view(View::Home);
+                    self.enter_view(View::Home);
                 }
             }
             // per-view actions
             KeyCode::Enter | KeyCode::Char('p') => match self.view {
-                View::Home => self.play_selected(),
-                View::Subs => self.load_selected_sub(),
+                View::Home | View::Subs => self.play_selected(),
                 View::Playlists => self.open_playlist(),
                 View::Downloads => self.play_file(),
                 View::History => self.replay_history(),
@@ -959,7 +989,7 @@ impl App {
                 self.query.clear();
                 self.status = "add sub: type @handle or channel URL, Enter to save".into();
             }
-            KeyCode::Char('d') if self.view == View::Subs => self.remove_sub(),
+            KeyCode::Char('d') if self.view == View::Subs => self.remove_selected_channel(),
             KeyCode::Char('d') if self.view == View::Playlists => self.delete_playlist(),
             KeyCode::Char('d') if self.view == View::Downloads => self.delete_file(),
             KeyCode::Char('D') if self.view == View::History => {
@@ -969,23 +999,21 @@ impl App {
             }
             // navigation
             KeyCode::Char('h') | KeyCode::Left => match self.view {
-                View::Home => self.move_sel(-1),
+                View::Home | View::Subs => self.move_sel(-1),
                 _ => {}
             },
             KeyCode::Char('l') | KeyCode::Right => match self.view {
-                View::Home => self.move_sel(1),
+                View::Home | View::Subs => self.move_sel(1),
                 _ => {}
             },
             KeyCode::Char('k') | KeyCode::Up => match self.view {
-                View::Home => self.move_sel(-(self.cols as isize)),
-                View::Subs => self.move_sub(-1),
+                View::Home | View::Subs => self.move_sel(-(self.cols as isize)),
                 View::Playlists => self.move_pl(-1),
                 View::Downloads => self.move_dl(-1),
                 View::History => self.move_hist(-1),
             },
             KeyCode::Char('j') | KeyCode::Down => match self.view {
-                View::Home => self.move_sel(self.cols as isize),
-                View::Subs => self.move_sub(1),
+                View::Home | View::Subs => self.move_sel(self.cols as isize),
                 View::Playlists => self.move_pl(1),
                 View::Downloads => self.move_dl(1),
                 View::History => self.move_hist(1),
@@ -993,7 +1021,6 @@ impl App {
             KeyCode::Char('g') => {
                 self.selected = 0;
                 self.row_offset = 0;
-                self.sub_selected = 0;
                 self.hist_selected = 0;
             }
             KeyCode::Char('G') => {
@@ -1008,15 +1035,15 @@ impl App {
                     self.apply_chip();
                 }
             }
-            KeyCode::Char('i') if self.view == View::Home => self.open_info(),
-            KeyCode::Char('c') if self.view == View::Home => self.open_comments(),
-            KeyCode::Char('x') if self.view == View::Home => self.open_actions(),
-            KeyCode::Char('a') if self.view == View::Home => self.queue_add(),
+            KeyCode::Char('i') if self.view == View::Home || self.view == View::Subs => self.open_info(),
+            KeyCode::Char('c') if self.view == View::Home || self.view == View::Subs => self.open_comments(),
+            KeyCode::Char('x') if self.view == View::Home || self.view == View::Subs => self.open_actions(),
+            KeyCode::Char('a') if self.view == View::Home || self.view == View::Subs => self.queue_add(),
             KeyCode::Char('Q') => { self.overlay = Some(Overlay::Queue); self.overlay_scroll = 0; }
-            KeyCode::Char('P') if self.view == View::Home => self.play_queue(),
-            KeyCode::Char('d') if self.view == View::Home => self.start_download(false),
-            KeyCode::Char('D') if self.view == View::Home => self.start_download(true),
-            KeyCode::Char('f') if self.view == View::Home => self.cycle_sort(),
+            KeyCode::Char('P') if self.view == View::Home || self.view == View::Subs => self.play_queue(),
+            KeyCode::Char('d') if self.view == View::Home || self.view == View::Subs => self.start_download(false),
+            KeyCode::Char('D') if self.view == View::Home || self.view == View::Subs => self.start_download(true),
+            KeyCode::Char('f') if self.view == View::Home || self.view == View::Subs => self.cycle_sort(),
             KeyCode::Char('n') => self.check_new(),
             KeyCode::Char('v') => {
                 let q = player::cycle_quality(&mut self.cfg);
@@ -1057,13 +1084,6 @@ impl App {
         }
     }
 
-    fn move_sub(&mut self, d: isize) {
-        if self.subs.is_empty() {
-            return;
-        }
-        let n = self.subs.len() as isize;
-        self.sub_selected = (self.sub_selected as isize + d).clamp(0, n - 1) as usize;
-    }
 
     fn move_hist(&mut self, d: isize) {
         if self.hist.is_empty() {
@@ -1122,34 +1142,90 @@ impl App {
 
     // ---------------- data jobs ----------------
 
-    pub fn live_search(&mut self, q: String) {
+    /// Enter a page, cheapest source first: memory → fresh disk → network.
+    pub fn enter_view(&mut self, v: View) {
+        self.pre_search = None;
+        match v {
+            View::Home => self.show_page(Page::Home),
+            View::Subs => self.show_page(Page::Subs),
+            _ => self.set_view(v),
+        }
+    }
+
+    fn show_page(&mut self, page: Page) {
+        let key = page_key(page);
+        self.view = match page {
+            Page::Home => View::Home,
+            Page::Subs => View::Subs,
+        };
+        self.query.clear();
+        if let Some(vids) = self.pages.get(&key).cloned() {
+            self.apply_videos(vids, false);
+            self.status = match page {
+                Page::Home => format!("{} home videos • / search • r refreshes", self.videos.len()),
+                Page::Subs => format!("{} latest from subs • a adds a channel", self.videos.len()),
+            };
+            return;
+        }
+        if let Some(vids) = read_page_cache(&key) {
+            self.pages.insert(key, vids.clone());
+            self.apply_videos(vids, true);
+            // stale-while-revalidate: show instantly, refresh behind
+            self.fetch_page(page);
+            return;
+        }
+        self.fetch_page(page);
+    }
+
+    /// `r`: refresh whichever page you're on (Home→home mix, Subs→subs feed).
+    pub fn refresh_current(&mut self) {
+        match self.view {
+            View::Home => self.fetch_page(Page::Home),
+            View::Subs => self.fetch_page(Page::Subs),
+            _ => {}
+        }
+    }
+
+    fn fetch_page(&mut self, page: Page) {
         if self.loading {
             return;
         }
-        self.loading = true;
-        self.status = format!("searching \"{q}\" via yt-dlp…");
+        match page {
+            Page::Home => self.fetch_home(),
+            Page::Subs => self.fetch_subs(),
+        }
+    }
+
+    /// Startup shim: Home page loads first, Subs goes lazy.
+    pub fn load_feed(&mut self) {
+        self.enter_view(View::Home);
+    }
+
+    fn fetch_home(&mut self) {
         let cfg = self.cfg.clone();
-        let sort = self.sort;
+        let subs = cfg.subscriptions.clone();
+        self.loading = true;
+        self.status = "loading Home…".into();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let res = youtube::search_sorted(&cfg, &q, cfg.search_limit, sort);
-            let _ = tx.send(res);
+            let res = youtube::home_feed(&cfg, &subs);
+            if let Ok(ref vids) = res {
+                save_page_cache("home", vids);
+            }
+            let _ = tx.send((Page::Home, res));
         });
     }
 
-    pub fn load_feed(&mut self) {
-        if self.loading {
-            return;
-        }
+    fn fetch_subs(&mut self) {
         let cfg = self.cfg.clone();
         let subs = cfg.subscriptions.clone();
         if subs.is_empty() {
-            self.status = "no subscriptions — press S then a to add".into();
+            self.status = "no subscriptions — press a to add one".into();
             return;
         }
         self.loading = true;
-        self.status = format!("loading feed ({} subs in parallel)…", subs.len());
+        self.status = format!("loading Subscriptions ({} channels)…", subs.len());
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
@@ -1172,7 +1248,7 @@ impl App {
                 per.push(h.join().unwrap_or_default());
             }
             let failed = per.iter().filter(|v| v.is_empty()).count();
-            // round-robin interleave so one channel can't dominate
+            // latest-first interleave (per-channel order preserved = newest first)
             let total_cap = cfg.feed_total.max(9);
             let mut all = Vec::with_capacity(total_cap);
             let depth = per.iter().map(|v| v.len()).max().unwrap_or(0);
@@ -1187,68 +1263,116 @@ impl App {
                 }
             }
             if all.is_empty() {
-                let _ = tx.send(Err(format!(
-                    "feed empty — {failed}/{} channels failed (private/renamed? try one with Enter in S view)",
-                    subs.len()
-                )));
+                let _ = tx.send((
+                    Page::Subs,
+                    Err(format!(
+                        "feed empty — {failed}/{} channels failed (renamed? click one in the sidebar)",
+                        subs.len()
+                    )),
+                ));
             } else {
-                save_feed_cache(&all);
-                let _ = tx.send(Ok(all));
+                save_page_cache("subs", &all);
+                let _ = tx.send((Page::Subs, Ok(all)));
             }
         });
     }
 
-    /// Instant startup: show last feed from disk if <15min old.
-    fn load_cached_feed(&mut self) {
-        let p = config::cache_dir().join("feed.json");
-        let Ok(bytes) = std::fs::read(&p) else {
-            return;
-        };
-        let Ok(cached): Result<CachedFeed, _> = serde_json::from_slice(&bytes) else {
-            return;
-        };
-        let age = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX)
-            .saturating_sub(cached.saved_at);
-        if age > 15 * 60 || cached.videos.is_empty() {
-            return;
-        }
-        self.videos = cached.videos;
+    fn apply_videos(&mut self, vids: Vec<Video>, cached: bool) {
+        self.videos = vids;
         self.filtered = (0..self.videos.len()).collect();
+        self.selected = 0;
+        self.row_offset = 0;
         self.live = true;
-        self.status = format!("{} cached videos • refreshing…", self.videos.len());
+        self.thumb_cache.clear();
+        self.thumb_order.clear();
+        if cached {
+            self.status = format!("{} cached videos • refreshing…", self.videos.len());
+        }
     }
 
-    fn load_selected_sub(&mut self) {
-        let Some((name, _)) = self.subs.get(self.sub_selected).cloned() else {
-            return;
-        };
-        let url = if name.starts_with('@') || name.starts_with("http") {
-            if name.starts_with('@') {
-                format!("https://www.youtube.com/{name}/videos")
-            } else {
-                name.clone()
-            }
+    /// Open one channel's videos (sidebar click) inside the Subs page.
+    pub fn load_channel(&mut self, name: &str) {
+        let url = if name.starts_with('@') {
+            format!("https://www.youtube.com/{name}/videos")
+        } else if name.starts_with("http") {
+            name.to_string()
         } else {
-            // bare name -> search it as channel
-            self.live_search(name);
+            self.live_search(name.to_string());
             return;
         };
         if self.loading {
             return;
         }
+        self.pre_search = None;
+        self.view = View::Subs;
         self.loading = true;
-        self.status = format!("loading {url} …");
+        self.status = format!("loading {name} …");
         let cfg = self.cfg.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let res = youtube::channel_videos(&cfg, &url, 12);
-            let _ = tx.send(res);
+            let _ = tx.send((Page::Subs, res));
         });
     }
+
+    /// Remove the channel behind the currently selected Subs video.
+    fn remove_selected_channel(&mut self) {
+        let Some(&vi) = self.filtered.get(self.selected) else {
+            return;
+        };
+        let Some(v) = self.videos.get(vi).cloned() else {
+            return;
+        };
+        let cand = if !v.channel_url.is_empty() {
+            Some(v.channel_url.clone())
+        } else if v.channel.starts_with('@') {
+            Some(v.channel.clone())
+        } else {
+            None
+        };
+        let Some(target) = cand else {
+            self.status = "no channel link on this video".into();
+            return;
+        };
+        let before = self.cfg.subscriptions.len();
+        self.cfg.subscriptions.retain(|s| {
+            s.to_lowercase() != target.to_lowercase()
+                && s.to_lowercase() != v.channel.to_lowercase()
+        });
+        if self.cfg.subscriptions.len() == before {
+            self.status = format!("{} isn't in subs (config has it under another name?)", v.channel);
+            return;
+        }
+        config::save(&self.cfg);
+        self.subs.retain(|(s, _)| {
+            s.to_lowercase() != target.to_lowercase()
+                && s.to_lowercase() != v.channel.to_lowercase()
+        });
+        self.status = format!("removed {} — r refreshes", v.channel);
+    }
+
+    pub fn live_search(&mut self, q: String) {
+        if self.loading {
+            return;
+        }
+        // snapshot current page so Esc restores it (no more lost feed)
+        self.pre_search = Some((self.view, self.videos.clone(), self.live));
+        self.loading = true;
+        self.status = format!("searching \"{q}\"… (lands on Home)");
+        let cfg = self.cfg.clone();
+        let sort = self.sort;
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = youtube::search_sorted(&cfg, &q, cfg.search_limit, sort);
+            let _ = tx.send((Page::Home, res));
+        });
+    }
+
+
+    /// Instant startup: show last feed from disk if <15min old.
+
 
     fn add_sub(&mut self, handle: String) {
         let h = handle.trim().to_string();
@@ -1265,16 +1389,6 @@ impl App {
         }
     }
 
-    fn remove_sub(&mut self) {
-        if self.subs.is_empty() {
-            return;
-        }
-        let (name, _) = self.subs.remove(self.sub_selected.min(self.subs.len() - 1));
-        self.cfg.subscriptions.retain(|s| s != &name);
-        config::save(&self.cfg);
-        self.sub_selected = self.sub_selected.min(self.subs.len().saturating_sub(1));
-        self.status = format!("removed {name}");
-    }
 
     fn replay_history(&mut self) {
         let Some(e) = self.hist.get(self.hist_selected).cloned() else {
@@ -1319,7 +1433,7 @@ impl App {
         self.rx = Some(rx);
         std::thread::spawn(move || {
             let res = youtube::private_playlist(&cfg, &which, 12);
-            let _ = tx.send(res);
+            let _ = tx.send((Page::Home, res));
         });
     }
 
@@ -1341,7 +1455,7 @@ impl App {
     // ---------------- easy-features ----------------
 
     fn current_video(&self) -> Option<Video> {
-        if self.view != View::Home { return None; }
+        if self.view != View::Home && self.view != View::Subs { return None; }
         self.filtered.get(self.selected).and_then(|vi| self.videos.get(*vi)).cloned()
     }
 
@@ -1486,7 +1600,7 @@ impl App {
             self.rx = Some(rx);
             std::thread::spawn(move || {
                 let res = youtube::search_sorted(&cfg, &q, cfg.search_limit, sort);
-                let _ = tx.send(res);
+                let _ = tx.send((Page::Home, res));
             });
         } else {
             self.status = format!("sort: {} (applies to next search)", self.sort.label());
@@ -1776,7 +1890,31 @@ struct CachedFeed {
     videos: Vec<Video>,
 }
 
-fn save_feed_cache(videos: &[Video]) {
+fn page_key(page: Page) -> String {
+    match page {
+        Page::Home => "home".to_string(),
+        Page::Subs => "subs".to_string(),
+    }
+}
+
+fn page_cache_age(key: &str) -> Option<(Vec<Video>, u64)> {
+    // legacy feed.json counts as the home page
+    let p = if key == "home" && !config::cache_dir().join("home.json").exists() {
+        config::cache_dir().join("feed.json")
+    } else {
+        config::cache_dir().join(format!("{key}.json"))
+    };
+    let bytes = std::fs::read(p).ok()?;
+    let cached: CachedFeed = serde_json::from_slice(&bytes).ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX)
+        .saturating_sub(cached.saved_at);
+    Some((cached.videos, age))
+}
+
+fn save_page_cache(key: &str, videos: &[Video]) {
     let saved_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1787,16 +1925,25 @@ fn save_feed_cache(videos: &[Video]) {
     };
     let _ = std::fs::create_dir_all(config::cache_dir());
     let _ = std::fs::write(
-        config::cache_dir().join("feed.json"),
+        config::cache_dir().join(format!("{key}.json")),
         serde_json::to_string(&cached).unwrap_or_default(),
     );
+}
+
+/// Fresh (<15min) page videos from disk, if any.
+fn read_page_cache(key: &str) -> Option<Vec<Video>> {
+    let (vids, age) = page_cache_age(key)?;
+    if age > 15 * 60 || vids.is_empty() {
+        return None;
+    }
+    Some(vids)
 }
 
 impl App {
     // ---------------- engagement (x menu / right-click) ----------------
 
     pub fn open_actions(&mut self) {
-        if self.view != View::Home || self.filtered.get(self.selected).is_none() { return; }
+        if (self.view != View::Home && self.view != View::Subs) || self.filtered.get(self.selected).is_none() { return; }
         self.overlay = Some(Overlay::Actions { idx: self.selected });
         self.settings_sel = 0;
         self.overlay_scroll = 0;

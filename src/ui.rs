@@ -32,7 +32,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(area);
 
     render_header(f, app, outer[0]);
-    if app.view == View::Home {
+    if app.view == View::Home || app.view == View::Subs {
         render_chips(f, app, outer[1]);
     } else {
         render_view_bar(f, app, outer[1]);
@@ -52,7 +52,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_sidebar(f, app, main_chunks[0]);
         match app.view {
             View::Home => render_grid(f, app, main_chunks[1]),
-            View::Subs => render_subs(f, app, main_chunks[1]),
+            View::Subs => render_grid(f, app, main_chunks[1]),
             View::Playlists => render_playlists(f, app, main_chunks[1]),
             View::Downloads => render_downloads(f, app, main_chunks[1]),
             View::History => render_history(f, app, main_chunks[1]),
@@ -60,7 +60,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else {
         match app.view {
             View::Home => render_grid(f, app, main_chunks[0]),
-            View::Subs => render_subs(f, app, main_chunks[0]),
+            View::Subs => render_grid(f, app, main_chunks[0]),
             View::Playlists => render_playlists(f, app, main_chunks[0]),
             View::Downloads => render_downloads(f, app, main_chunks[0]),
             View::History => render_history(f, app, main_chunks[0]),
@@ -263,18 +263,27 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         y += 1;
     }
-    // channel list preview (first 7)
+    // channel list (clickable: opens the channel in Subs)
+    app.chan_hits.clear();
     lines.push(Line::from(Span::styled(
         "────────────────────",
         Style::default().fg(DIM),
     )));
-    for (name, fresh) in app.subs.iter().take(7) {
+    let mut cy = area.y + lines.len() as u16;
+    for (name, fresh) in app.subs.iter() {
         let dot = if *fresh { " •" } else { "" };
         lines.push(Line::from(vec![
             Span::styled("◉ ", Style::default().fg(Color::Red)),
             Span::styled(name.clone(), Style::default().fg(Color::White)),
             Span::styled(dot, Style::default().fg(ACCENT)),
         ]));
+        if cy < area.y + area.height {
+            app.chan_hits.push((
+                Rect { x: area.x, y: cy, width: area.width, height: 1 },
+                name.clone(),
+            ));
+        }
+        cy += 1;
     }
 
     let p = Paragraph::new(lines).block(
@@ -336,54 +345,6 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn render_subs(f: &mut Frame, app: &mut App, area: Rect) {
-    app.card_hits.clear();
-    app.list_hits.clear();
-    let mut lines: Vec<Line> = vec![];
-    if app.subs.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No subscriptions — press a to add @handle",
-            Style::default().fg(DIM),
-        )));
-    }
-    for (i, (name, _)) in app.subs.iter().enumerate() {
-        let sel = i == app.sub_selected;
-        let row_rect = Rect {
-            x: area.x + 1,
-            y: area.y + 1 + i as u16,
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        if row_rect.y < area.y + area.height {
-            app.list_hits.push((row_rect, i));
-        }
-        lines.push(Line::from(Span::styled(
-            format!("{} {name}", if sel { "▶" } else { " ◉" }),
-            Style::default()
-                .fg(if sel { Color::White } else { DIM })
-                .bg(if sel {
-                    Color::Rgb(30, 50, 85)
-                } else {
-                    BG
-                })
-                .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
-        )));
-    }
-    lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled(
-        "Enter load channel • a add • d remove • r refresh all feed",
-        Style::default().fg(DIM),
-    )));
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Subscriptions")
-                .style(Style::default().bg(BG)),
-        ),
-        area,
-    );
-}
 
 fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     app.card_hits.clear();

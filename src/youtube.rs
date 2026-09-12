@@ -147,7 +147,7 @@ pub fn search_sorted(
     Ok(vids)
 }
 
-fn view_key(s: &str) -> u64 {
+pub fn view_key(s: &str) -> u64 {
     // "1.2M views" -> 1200000; "" -> 0
     let s = s.replace(" views", "").replace(" view", "");
     if let Some(n) = s.strip_suffix('M') {
@@ -168,6 +168,43 @@ pub fn dur_secs(s: &str) -> u64 {
     // "m:ss" or "h:mm:ss" -> seconds
     let parts: Vec<u64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
     parts.iter().fold(0, |a, b| a * 60 + b)
+}
+
+/// Home page (youtube.com/): personalized recommendations when logged in
+/// (homepage JSON only has entries with cookies), else a "popular" mix —
+/// top-viewed videos across your subs. Either way it is NOT the subs feed.
+pub fn home_feed(cfg: &config::Config, subs: &[String]) -> Result<Vec<Video>, String> {
+    // 1. personalized homepage (needs login cookies)
+    if cfg.use_cookies || !cfg.cookies_file.is_empty() {
+        let mut args = base_args(cfg);
+        args.push("--playlist-end".to_string());
+        args.push("30".to_string());
+        args.push("https://www.youtube.com/".to_string());
+        if let Ok(raw) = run_ytdlp(&args) {
+            if let Ok(vids) = parse_flat(&raw) {
+                if !vids.is_empty() {
+                    return Ok(vids);
+                }
+            }
+        }
+    }
+    // 2. popular mix: 6 per channel, sorted by views desc
+    let mut per: Vec<Vec<Video>> = vec![];
+    for s in subs.iter() {
+        let url = if s.starts_with('@') {
+            format!("https://www.youtube.com/{s}/videos")
+        } else {
+            s.clone()
+        };
+        per.push(channel_videos(cfg, &url, 6).unwrap_or_default());
+    }
+    let mut all: Vec<Video> = per.into_iter().flatten().collect();
+    all.sort_by_key(|v| std::cmp::Reverse(view_key(&v.views)));
+    all.truncate(30);
+    if all.is_empty() {
+        return Err("home feed empty — add subs (S then a) or log in".into());
+    }
+    Ok(all)
 }
 
 /// Channel videos via `yt-dlp --flat-playlist -J <url>` (works for @handles).

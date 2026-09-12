@@ -4,8 +4,7 @@ Lightweight terminal YouTube client — YouTube.com layout in the terminal, ASCI
 
 ![layout](docs/mockup.png)
 
-MVP matches the mockup: header + sidebar + topic chips + 3x3 video grid.
-Starts offline (mock data), press `/` for live search, `r` for subs feed.
+Two real pages like youtube.com: `0` Home (recommended/popular mix, personalized with login) and `s` Subscriptions (latest from your channels). Search snapshots the page — Esc restores it, no more lost feeds.
 
 ## Run
 
