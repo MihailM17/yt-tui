@@ -10,10 +10,14 @@ Starts offline (mock data), press `/` for live search, `r` for subs feed.
 ## Run
 
 ```bash
-cargo run --release
-# live search: press / type query Enter (uses yt-dlp, background thread)
-# feed: press r (reads ~/.config/yt-tui/config.json subscriptions)
-# back to offline mock: press m
+cd ~/Documents/Personal_Projects/yt-tui
+cargo run --release          # must run INSIDE the project dir (Cargo.toml lives here)
+
+# or install once, run from anywhere:
+cargo install --path .
+yt-tui
+
+# or grab the prebuilt macOS binary: GitHub → Releases → v0.2.0
 ```
 
 Requires: terminal with truecolor + Nerd Font. Best in Kitty / WezTerm / Ghostty / foot. Falls back to block-art anywhere.
@@ -24,7 +28,11 @@ Deps at runtime for playback (wired in `src/player.rs`):
 
 ## Keys
 
-- Mouse-first: click search, sidebar, thumbs (again = play), chips, transport ⏸⏭, gear ⚙, overlay ✕, settings rows; wheel scrolls; hover highlights
+- Mouse-first: click search, sidebar, thumbs (again = play), chips (filter for real), transport ⏸⏭, gear ⚙, overlay ✕, settings rows; wheel scrolls; hover highlights
+- `;` playlists (save queue with s) • `b` downloads (Enter plays) • `x`/right-click actions
+- `i` info+chapters+related rail (click/1-9 plays) • `c` comments • `f` sort • `n` new-check
+- `d/D` download video/mp3 • `v` quality • `C` subtitles • `z` sleep timer • `[/]` speed • `?` help
+- Single player window + open debounce • resume positions • SponsorBlock skip (toggle in Settings)
 - `0/s/y` views • `u` login • `w/t` later/liked • `r` refresh (auto on launch) • `+` more
 - `⚙`/`,` Settings: player, quality, thumbs, browser, cookies, feeds — click/Enter, persists
 - `i` info+chapters • `c` comments • `f` sort (relevance/views/longest/shortest)

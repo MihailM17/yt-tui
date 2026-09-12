@@ -53,12 +53,16 @@ pub fn render(f: &mut Frame, app: &mut App) {
         match app.view {
             View::Home => render_grid(f, app, main_chunks[1]),
             View::Subs => render_subs(f, app, main_chunks[1]),
+            View::Playlists => render_playlists(f, app, main_chunks[1]),
+            View::Downloads => render_downloads(f, app, main_chunks[1]),
             View::History => render_history(f, app, main_chunks[1]),
         }
     } else {
         match app.view {
             View::Home => render_grid(f, app, main_chunks[0]),
             View::Subs => render_subs(f, app, main_chunks[0]),
+            View::Playlists => render_playlists(f, app, main_chunks[0]),
+            View::Downloads => render_downloads(f, app, main_chunks[0]),
             View::History => render_history(f, app, main_chunks[0]),
         }
     }
@@ -70,6 +74,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             View::Home if app.live => "●LIVE",
             View::Home => "○MOCK",
             View::Subs => "◦SUBS",
+            View::Playlists => "◦PLAYLISTS",
+            View::Downloads => "◦DOWNLOADS",
             View::History => "◦HIST",
         };
         let login = match app.login_ok {
@@ -220,9 +226,11 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         ("", None),
         ("Subscriptions  ›", None),
         ("◦ Subs  (s)", Some(SidebarAction::Go(View::Subs))),
+        ("☰ Playlists  (;)", Some(SidebarAction::Go(View::Playlists))),
         ("", None),
         ("You  ›", None),
         ("↻ History  (y)", Some(SidebarAction::Go(View::History))),
+        ("⬇ Downloads  (b)", Some(SidebarAction::Go(View::Downloads))),
         ("◷ Later  (w)", Some(SidebarAction::Later)),
         ("♡ Liked  (t)", Some(SidebarAction::Liked)),
         ("🔑 Login  (u)", Some(SidebarAction::Login)),
@@ -428,6 +436,70 @@ fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_playlists(f: &mut Frame, app: &mut App, area: Rect) {
+    app.card_hits.clear();
+    app.list_hits.clear();
+    let mut lines: Vec<Line> = vec![];
+    if app.pl_names.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No playlists — hover videos in Home, a adds to queue, then s here saves it",
+            Style::default().fg(DIM),
+        )));
+    }
+    for (i, name) in app.pl_names.iter().enumerate() {
+        let sel = i == app.pl_sel;
+        let rr = Rect { x: area.x + 1, y: area.y + 1 + i as u16, width: area.width.saturating_sub(2), height: 1 };
+        if rr.y < area.y + area.height {
+            app.list_hits.push((rr, i));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{} {name}", if sel { "▶" } else { " ♫" }),
+            Style::default()
+                .fg(if sel { Color::White } else { DIM })
+                .bg(if sel { Color::Rgb(30, 50, 85) } else { BG })
+                .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+        )));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled("Enter open in Home • s save queue • d delete", Style::default().fg(DIM))));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Playlists").style(Style::default().bg(BG))),
+        area,
+    );
+}
+
+fn render_downloads(f: &mut Frame, app: &mut App, area: Rect) {
+    app.card_hits.clear();
+    app.list_hits.clear();
+    let mut lines: Vec<Line> = vec![];
+    if app.dl_files.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Empty — d on a Home video downloads it here",
+            Style::default().fg(DIM),
+        )));
+    }
+    for (i, (_, name)) in app.dl_files.iter().enumerate() {
+        let sel = i == app.dl_sel;
+        let rr = Rect { x: area.x + 1, y: area.y + 1 + i as u16, width: area.width.saturating_sub(2), height: 1 };
+        if rr.y < area.y + area.height {
+            app.list_hits.push((rr, i));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{} {name}", if sel { "▶" } else { " ⬇" }),
+            Style::default()
+                .fg(if sel { Color::White } else { DIM })
+                .bg(if sel { Color::Rgb(30, 50, 85) } else { BG })
+                .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+        )));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled("Enter play • d delete file", Style::default().fg(DIM))));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Downloads").style(Style::default().bg(BG))),
+        area,
+    );
+}
+
 fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selected: bool) {
     if area.height < 10 || area.width < 20 {
         return;
@@ -523,7 +595,9 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
     app.close_rect = xr;
     f.render_widget(Paragraph::new(Span::styled(" ✕ ", Style::default().fg(Color::White).bg(Color::Rgb(150, 50, 50)).add_modifier(Modifier::BOLD))), xr);
     let (title, lines): (String, Vec<Line>) = match ov {
-        Overlay::Info { vid: _, info } => {
+        Overlay::Info { vid: _, info, related } => {
+            // related rows clickable via settings_hits (cleared per overlay)
+            app.settings_hits.clear();
             let mut l = vec![
                 Line::from(Span::styled(info.title.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
                 Line::from(Span::styled(format!("{} • {} • {} • {} • ♥ {}", info.channel, info.views, info.date, info.duration, info.likes), Style::default().fg(ACCENT))),
@@ -543,7 +617,28 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
                     l.push(Line::from(Span::styled(format!("  {ts}  {name}"), Style::default().fg(DIM))));
                 }
             }
-            ("Info  (j/k scroll • Esc close)".into(), l)
+            app.info_hits.clear();
+            if !related.is_empty() {
+                l.push(Line::from(Span::raw("")));
+                l.push(Line::from(Span::styled("More from this channel (click/1-9):", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+                let first_row = l.len();
+                for (k, rv) in related.iter().take(9).enumerate() {
+                    l.push(Line::from(vec![
+                        Span::styled(format!("{} ", k + 1), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                        Span::styled(truncate(&rv.title, 60), Style::default().fg(Color::White)),
+                        Span::styled(format!("  {}", rv.duration), Style::default().fg(DIM)),
+                    ]));
+                    // screen row of this line, scroll-aware
+                    let sy = (first_row + k) as i32 - app.overlay_scroll as i32;
+                    if sy >= 0 {
+                        let rr = Rect { x: rect.x + 2, y: rect.y + 2 + sy as u16, width: rect.width.saturating_sub(4), height: 1 };
+                        if rr.y > rect.y && rr.y < rect.y + rect.height.saturating_sub(1) {
+                            app.info_hits.push((rr, k));
+                        }
+                    }
+                }
+            }
+            ("Info  (j/k scroll • 1-9 plays related • Esc close)".into(), l)
         }
         Overlay::Comments { vid: _, items } => {
             let mut l = vec![Line::from(Span::styled(format!("{} comments", items.len()), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))];

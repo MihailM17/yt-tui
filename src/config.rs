@@ -62,6 +62,12 @@ pub struct Config {
     /// Toggle live in Settings (gear icon / `,`).
     #[serde(default = "default_thumb_mode")]
     pub thumb_mode: String,
+    /// Auto-skip sponsors/self-promos via SponsorBlock (mpv lua, zero setup).
+    #[serde(default = "default_true")]
+    pub sponsorblock: bool,
+    /// English subtitles when available (mpv ytdl subs).
+    #[serde(default)]
+    pub subtitles: bool,
 }
 
 fn default_player() -> String {
@@ -115,6 +121,8 @@ impl Default for Config {
             quality: default_quality(),
             download_dir: String::new(),
             thumb_mode: default_thumb_mode(),
+            sponsorblock: true,
+            subtitles: false,
         }
     }
 }
@@ -163,6 +171,7 @@ pub fn load() -> Config {
                 "\"browser\"",
                 "\"thumb_quality\"",
                 "\"thumb_mode\"",
+                "\"sponsorblock\"",
                 "\"feed_per_channel\"",
                 "\"cookies_file\"",
             ] {

@@ -8,7 +8,7 @@ use crate::{config, data, engage, player, thumb, youtube};
 use crate::youtube::{SortMode, VideoInfo, Comment};
 use ratatui_image::{picker::{Picker, ProtocolType}, protocol::StatefulProtocol};
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Video {
     pub id: String,
     pub title: String,
@@ -29,12 +29,14 @@ pub struct Video {
 pub enum View {
     Home,
     Subs,
+    Playlists,
+    Downloads,
     History,
 }
 
 #[derive(Clone, PartialEq)]
 pub enum Overlay {
-    Info { vid: String, info: VideoInfo },
+    Info { vid: String, info: VideoInfo, related: Vec<Video> },
     Comments { vid: String, items: Vec<Comment> },
     Queue,
     Actions { idx: usize },
@@ -67,6 +69,11 @@ pub struct App {
     pub active_chip: usize,
     pub subs: Vec<(String, bool)>,
     pub sub_selected: usize,
+    pub pl_names: Vec<String>,
+    pub pl_sel: usize,
+    pub adding_pl: bool,
+    pub dl_files: Vec<(String, String)>,
+    pub dl_sel: usize,
     pub hist: Vec<config::HistoryEntry>,
     pub hist_selected: usize,
     pub query: String,
@@ -93,7 +100,7 @@ pub struct App {
     pub overlay_scroll: usize,
     pub queue: Vec<Video>,
     pub sort: SortMode,
-    rx_info: Option<std::sync::mpsc::Receiver<Result<(String, VideoInfo), String>>>,
+    rx_info: Option<std::sync::mpsc::Receiver<Result<(String, VideoInfo, Vec<Video>), String>>>,
     rx_comments: Option<std::sync::mpsc::Receiver<Result<(String, Vec<Comment>), String>>>,
     rx_dl: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     rx_new: Option<std::sync::mpsc::Receiver<Vec<String>>>,
@@ -102,6 +109,7 @@ pub struct App {
     mpv: Option<std::process::Child>,
     last_play: Option<std::time::Instant>,
     last_play_id: String,
+    now_playing: Option<(String, u64)>,
     pub picker: Option<Picker>,
     img_protos: std::collections::HashMap<String, StatefulProtocol>,
     pub settings_sel: usize,
@@ -110,6 +118,11 @@ pub struct App {
     pub gear_rect: Rect,
     pub transport_hits: Vec<(Rect, TransportAction)>,
     pub hover: Option<(u16, u16)>,
+    pub info_hits: Vec<(Rect, usize)>,
+    pub suggest: Vec<String>,
+    rx_suggest: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    suggest_for: String,
+    pub sleep_until: Option<std::time::Instant>,
 }
 
 impl App {
@@ -143,6 +156,11 @@ impl App {
             active_chip: 0,
             subs,
             sub_selected: 0,
+            pl_names: vec![],
+            pl_sel: 0,
+            adding_pl: false,
+            dl_files: vec![],
+            dl_sel: 0,
             hist: vec![],
             hist_selected: 0,
             query: String::new(),
@@ -177,6 +195,7 @@ impl App {
             mpv: None,
             last_play: None,
             last_play_id: String::new(),
+            now_playing: None,
             picker,
             img_protos: std::collections::HashMap::new(),
             settings_sel: 0,
@@ -185,6 +204,11 @@ impl App {
             gear_rect: Rect::default(),
             transport_hits: vec![],
             hover: None,
+            info_hits: vec![],
+            suggest: vec![],
+            rx_suggest: None,
+            suggest_for: String::new(),
+            sleep_until: None,
         };
         // instant startup: show last feed from disk (<15min old), bg refresh anyway
         app.load_cached_feed();
@@ -239,6 +263,14 @@ impl App {
         self.status = match v {
             View::Home => "home — / search • r feed • Enter play".into(),
             View::Subs => "subs — Enter load channel • a add • d remove • r refresh all".into(),
+            View::Playlists => {
+                self.reload_playlists();
+                "playlists — Enter open • s save queue • d delete".into()
+            }
+            View::Downloads => {
+                self.reload_downloads();
+                "downloads — Enter play • d delete file".into()
+            }
             View::History => {
                 self.reload_hist();
                 "history — Enter replay • D clear • local only, no login needed".into()
@@ -249,6 +281,131 @@ impl App {
     fn reload_hist(&mut self) {
         self.hist = config::load_history(self.cfg.max_history);
         self.hist_selected = 0;
+    }
+
+    // ---------------- local playlists + downloads ----------------
+
+    fn playlists_path() -> std::path::PathBuf {
+        config::data_dir().join("playlists.json")
+    }
+
+    fn load_playlists_map() -> std::collections::HashMap<String, Vec<Video>> {
+        std::fs::read(Self::playlists_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn reload_playlists(&mut self) {
+        let mut names: Vec<String> = Self::load_playlists_map().keys().cloned().collect();
+        names.sort();
+        self.pl_names = names;
+        self.pl_sel = 0;
+    }
+
+    fn move_pl(&mut self, d: isize) {
+        if self.pl_names.is_empty() { return; }
+        let n = self.pl_names.len() as isize;
+        self.pl_sel = (self.pl_sel as isize + d).clamp(0, n - 1) as usize;
+    }
+
+    fn move_dl(&mut self, d: isize) {
+        if self.dl_files.is_empty() { return; }
+        let n = self.dl_files.len() as isize;
+        self.dl_sel = (self.dl_sel as isize + d).clamp(0, n - 1) as usize;
+    }
+
+    fn reload_downloads(&mut self) {
+        let dir = config::download_dir(&self.cfg);
+        let mut files: Vec<(String, String)> = vec![];
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut es: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+            es.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+            es.reverse();
+            for e in es {
+                let path = e.path();
+                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+                if ["mp4", "mkv", "webm", "mp3", "m4a", "opus"].contains(&ext.as_str()) {
+                    let name = path.file_name().and_then(|x| x.to_str()).unwrap_or("?").to_string();
+                    files.push((path.to_string_lossy().to_string(), name));
+                }
+            }
+        }
+        self.dl_files = files;
+        self.dl_sel = 0;
+    }
+
+    fn open_playlist(&mut self) {
+        let Some(name) = self.pl_names.get(self.pl_sel).cloned() else {
+            self.status = "no playlists — press s to save the queue".into();
+            return;
+        };
+        let map = Self::load_playlists_map();
+        let Some(vids) = map.get(&name) else { return };
+        if vids.is_empty() {
+            self.status = format!("'{name}' is empty");
+            return;
+        }
+        self.view = View::Home;
+        self.videos = vids.clone();
+        self.filtered = (0..self.videos.len()).collect();
+        self.selected = 0;
+        self.row_offset = 0;
+        self.live = true;
+        self.thumb_cache.clear();
+        self.thumb_order.clear();
+        self.status = format!("playlist '{name}' • {} videos", vids.len());
+    }
+
+    fn save_queue_playlist(&mut self, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() || self.queue.is_empty() { return; }
+        let mut map = Self::load_playlists_map();
+        map.insert(name.clone(), self.queue.clone());
+        let _ = std::fs::create_dir_all(config::data_dir());
+        let _ = std::fs::write(Self::playlists_path(), serde_json::to_string_pretty(&map).unwrap_or_default());
+        self.reload_playlists();
+        self.status = format!("saved playlist '{name}' ({} videos)", self.queue.len());
+    }
+
+    fn delete_playlist(&mut self) {
+        let Some(name) = self.pl_names.get(self.pl_sel).cloned() else { return };
+        let mut map = Self::load_playlists_map();
+        map.remove(&name);
+        let _ = std::fs::write(Self::playlists_path(), serde_json::to_string_pretty(&map).unwrap_or_default());
+        self.reload_playlists();
+        self.status = format!("deleted playlist '{name}'");
+    }
+
+    fn play_file(&mut self) {
+        let Some((path, name)) = self.dl_files.get(self.dl_sel).cloned() else {
+            self.status = "no downloads yet — d on a video saves one".into();
+            return;
+        };
+        if let Some(mut child) = self.mpv.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        match player::play_file(&path, &self.cfg) {
+            Ok(child) => {
+                self.mpv = Some(child);
+                self.last_play = Some(std::time::Instant::now());
+                self.last_play_id = path;
+                self.status = format!("▶ {name}");
+            }
+            Err(e) => self.status = format!("play failed: {e}"),
+        }
+    }
+
+    fn delete_file(&mut self) {
+        let Some((path, name)) = self.dl_files.get(self.dl_sel).cloned() else { return };
+        match std::fs::remove_file(&path) {
+            Ok(_) => {
+                self.status = format!("deleted {name}");
+                self.reload_downloads();
+            }
+            Err(e) => self.status = format!("delete failed: {e}"),
+        }
     }
 
     // ---------------- background poll ----------------
@@ -324,9 +481,9 @@ impl App {
         }
         if let Some(rx) = &self.rx_info {
             match rx.try_recv() {
-                Ok(Ok((vid, info))) => {
+                Ok(Ok((vid, info, related))) => {
                     self.loading = false;
-                    self.overlay = Some(Overlay::Info { vid, info });
+                    self.overlay = Some(Overlay::Info { vid, info, related });
                     self.overlay_scroll = 0;
                     self.rx_info = None;
                 }
@@ -411,6 +568,19 @@ impl App {
                 Err(_) => { self.rx_act = None; }
             }
         }
+        if let Some(rx) = &self.rx_suggest {
+            match rx.try_recv() {
+                Ok(list) => {
+                    self.suggest = list;
+                    if !self.suggest.is_empty() && self.searching {
+                        self.status = format!("Tab → {}", self.suggest[0]);
+                    }
+                    self.rx_suggest = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(_) => { self.rx_suggest = None; }
+            }
+        }
         if let Some(rx) = &self.rx_new {
             match rx.try_recv() {
                 Ok(fresh) => {
@@ -491,6 +661,15 @@ impl App {
                     }
                     return;
                 }
+                if matches!(self.overlay, Some(Overlay::Info { .. })) {
+                    for (rect, k) in self.info_hits.clone() {
+                        if inside(rect, x, y) {
+                            self.play_related(k);
+                            return;
+                        }
+                    }
+                    return;
+                }
                 if matches!(self.overlay, Some(Overlay::Actions { .. })) {
                     for (rect, idx) in self.settings_hits.clone() {
                         if inside(rect, x, y) {
@@ -537,9 +716,21 @@ impl App {
                             match self.view {
                                 View::Subs => {
                                     self.sub_selected = idx;
-                                    // double-click (click selected) loads channel
-                                    // single click just selects; simplest: load on click
                                     self.load_selected_sub();
+                                }
+                                View::Playlists => {
+                                    if self.pl_sel == idx {
+                                        self.open_playlist();
+                                    } else {
+                                        self.pl_sel = idx;
+                                    }
+                                }
+                                View::Downloads => {
+                                    if self.dl_sel == idx {
+                                        self.play_file();
+                                    } else {
+                                        self.dl_sel = idx;
+                                    }
                                 }
                                 View::History => {
                                     self.hist_selected = idx;
@@ -556,11 +747,15 @@ impl App {
             MouseEventKind::ScrollUp => match self.view {
                 View::Home => self.move_sel(-(self.cols as isize)),
                 View::Subs => self.move_sub(-1),
+                View::Playlists => self.move_pl(-1),
+                View::Downloads => self.move_dl(-1),
                 View::History => self.move_hist(-1),
             },
             MouseEventKind::ScrollDown => match self.view {
                 View::Home => self.move_sel(self.cols as isize),
                 View::Subs => self.move_sub(1),
+                View::Playlists => self.move_pl(1),
+                View::Downloads => self.move_dl(1),
                 View::History => self.move_hist(1),
             },
             _ => {}
@@ -570,6 +765,23 @@ impl App {
     // ---------------- keyboard ----------------
 
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if self.adding_pl {
+            match code {
+                KeyCode::Esc => { self.adding_pl = false; self.query.clear(); }
+                KeyCode::Enter => {
+                    let n = self.query.clone();
+                    self.adding_pl = false;
+                    self.query.clear();
+                    self.save_queue_playlist(n);
+                }
+                KeyCode::Backspace => { self.query.pop(); }
+                KeyCode::Char(c) => {
+                    if !mods.contains(KeyModifiers::CONTROL) { self.query.push(c); }
+                }
+                _ => {}
+            }
+            return;
+        }
         // overlays eat keys first
         if self.overlay.is_some() {
             let is_settings = matches!(self.overlay, Some(Overlay::Settings));
@@ -590,6 +802,11 @@ impl App {
                     if is_settings || is_actions {
                         self.settings_sel = self.settings_sel.saturating_sub(1);
                     } else { self.overlay_scroll = self.overlay_scroll.saturating_sub(1); }
+                    return;
+                }
+                KeyCode::Char(c) if ('1'..='9').contains(&c) && matches!(self.overlay, Some(Overlay::Info { .. })) => {
+                    let k = (c as usize) - ('1' as usize);
+                    self.play_related(k);
                     return;
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
@@ -657,6 +874,13 @@ impl App {
                     if !mods.contains(KeyModifiers::CONTROL) {
                         self.query.push(c);
                         self.apply_filter();
+                        self.maybe_suggest();
+                    }
+                }
+                KeyCode::Tab => {
+                    if let Some(s) = self.suggest.first().cloned() {
+                        self.query = s;
+                        self.apply_filter();
                     }
                 }
                 _ => {}
@@ -669,7 +893,21 @@ impl App {
             // s subs, y history (You), u login (aUth), w watch-later, t liked.
             // Uppercase S/H/L/W/T kept for compat.
             KeyCode::Char('0') => self.set_view(View::Home),
-            KeyCode::Char('s') | KeyCode::Char('S') => self.set_view(View::Subs),
+            KeyCode::Char(';') => self.set_view(View::Playlists),
+            KeyCode::Char('b') => self.set_view(View::Downloads),
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if self.view == View::Playlists {
+                    if self.queue.is_empty() {
+                        self.status = "queue empty — a on videos to add first".into();
+                    } else {
+                        self.adding_pl = true;
+                        self.query.clear();
+                        self.status = "playlist name: type + Enter".into();
+                    }
+                } else {
+                    self.set_view(View::Subs);
+                }
+            }
             KeyCode::Char('y') | KeyCode::Char('H') => self.set_view(View::History),
             KeyCode::Char('u') | KeyCode::Char('L') => self.test_login(),
             KeyCode::Char('w') | KeyCode::Char('W') => self.load_private("later"),
@@ -711,6 +949,8 @@ impl App {
             KeyCode::Enter | KeyCode::Char('p') => match self.view {
                 View::Home => self.play_selected(),
                 View::Subs => self.load_selected_sub(),
+                View::Playlists => self.open_playlist(),
+                View::Downloads => self.play_file(),
                 View::History => self.replay_history(),
             },
             KeyCode::Char('o') => self.open_selected(),
@@ -720,6 +960,8 @@ impl App {
                 self.status = "add sub: type @handle or channel URL, Enter to save".into();
             }
             KeyCode::Char('d') if self.view == View::Subs => self.remove_sub(),
+            KeyCode::Char('d') if self.view == View::Playlists => self.delete_playlist(),
+            KeyCode::Char('d') if self.view == View::Downloads => self.delete_file(),
             KeyCode::Char('D') if self.view == View::History => {
                 config::clear_history();
                 self.reload_hist();
@@ -737,11 +979,15 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => match self.view {
                 View::Home => self.move_sel(-(self.cols as isize)),
                 View::Subs => self.move_sub(-1),
+                View::Playlists => self.move_pl(-1),
+                View::Downloads => self.move_dl(-1),
                 View::History => self.move_hist(-1),
             },
             KeyCode::Char('j') | KeyCode::Down => match self.view {
                 View::Home => self.move_sel(self.cols as isize),
                 View::Subs => self.move_sub(1),
+                View::Playlists => self.move_pl(1),
+                View::Downloads => self.move_dl(1),
                 View::History => self.move_hist(1),
             },
             KeyCode::Char('g') => {
@@ -759,7 +1005,7 @@ impl App {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.chips.len() {
                     self.active_chip = i;
-                    self.status = format!("filter: {}", self.chips[i]);
+                    self.apply_chip();
                 }
             }
             KeyCode::Char('i') if self.view == View::Home => self.open_info(),
@@ -781,6 +1027,12 @@ impl App {
             KeyCode::Char(',') => { self.overlay = Some(Overlay::Settings); self.overlay_scroll = 0; self.settings_sel = 0; }
             KeyCode::Char(' ') => self.toggle_pause(),
             KeyCode::Char('>') => self.next_track(),
+            KeyCode::Char('z') => self.cycle_sleep(),
+            KeyCode::Char('C') => {
+                self.cfg.subtitles = !self.cfg.subtitles;
+                config::save(&self.cfg);
+                self.status = format!("subtitles {} (next play)", if self.cfg.subtitles { "on" } else { "off" });
+            }
             KeyCode::Char('?') => { self.overlay = Some(Overlay::Help); self.overlay_scroll = 0; }
             KeyCode::Tab => {
                 self.active_chip = (self.active_chip + 1) % self.chips.len();
@@ -819,6 +1071,30 @@ impl App {
         }
         let n = self.hist.len() as isize;
         self.hist_selected = (self.hist_selected as isize + d).clamp(0, n - 1) as usize;
+    }
+
+    /// Topic chips actually filter: "All" clears, else case-insensitive
+    /// substring match on title+channel (honest local approximation of topics).
+    fn apply_chip(&mut self) {
+        let chip = self.chips.get(self.active_chip).cloned().unwrap_or_default();
+        if chip == "All" || chip.is_empty() {
+            self.filtered = (0..self.videos.len()).collect();
+            self.status = format!("{} videos", self.filtered.len());
+        } else {
+            let q = chip.to_lowercase();
+            self.filtered = self
+                .videos
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| {
+                    v.title.to_lowercase().contains(&q) || v.channel.to_lowercase().contains(&q)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            self.status = format!("{} results for chip '{chip}' • 1 = All", self.filtered.len());
+        }
+        self.selected = 0;
+        self.row_offset = 0;
     }
 
     fn apply_filter(&mut self) {
@@ -1077,9 +1353,18 @@ impl App {
         self.status = format!("info for {} …", short(&v.title));
         let (tx, rx) = mpsc::channel();
         self.rx_info = Some(rx);
+        let cfg = self.cfg.clone();
         std::thread::spawn(move || {
             let id = v.id.clone();
-            let res = youtube::video_info(&id).map(|info| (id, info));
+            let res = youtube::video_info(&id).and_then(|info| {
+                // related rail = more from the same channel (no extra API)
+                let related = if info.channel_url.is_empty() {
+                    vec![]
+                } else {
+                    youtube::channel_videos(&cfg, &info.channel_url, 6).unwrap_or_default()
+                };
+                Ok((id, info, related))
+            });
             let _ = tx.send(res);
         });
     }
@@ -1123,6 +1408,70 @@ impl App {
         if self.rx_dl.is_some() { self.status = "download already running…".into(); return; }
         self.status = format!("downloading {} to {} …", if audio_only { "audio" } else { "video" }, config::download_dir(&self.cfg).to_string_lossy());
         self.rx_dl = Some(player::download(&v.id, audio_only, &self.cfg));
+    }
+
+    /// Search suggestions via Google's suggest API (curl, debounced by caller length).
+    fn maybe_suggest(&mut self) {
+        if self.query.len() < 2 || self.query == self.suggest_for || self.rx_suggest.is_some() {
+            return;
+        }
+        self.suggest_for = self.query.clone();
+        let q = self.query.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx_suggest = Some(rx);
+        std::thread::spawn(move || {
+            let url = format!("https://suggestqueries.google.com/complete/search?client=youtube&ds=yt&q={}", percent_encode(&q));
+            let out = std::process::Command::new("curl")
+                .args(["-sL", "--max-time", "6", &url])
+                .output();
+            let mut out_vec = vec![];
+            if let Ok(o) = out {
+                // JSONP: window.google.ac.h([...]) — strip wrapper first
+                let mut body = o.stdout.as_slice();
+                if let Some(start) = body.iter().position(|&b| b == b'[') {
+                    body = &body[start..];
+                }
+                if let Some(end) = body.iter().rposition(|&b| b == b']') {
+                    body = &body[..=end];
+                }
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                    if let Some(arr) = v.get(1).and_then(|x| x.as_array()) {
+                        for s in arr.iter().take(5) {
+                            if let Some(text) = s.as_str() {
+                                out_vec.push(text.to_string());
+                            } else if let Some(text) = s.get(0).and_then(|x| x.as_str()) {
+                                out_vec.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(out_vec);
+        });
+    }
+
+    /// Sleep timer: off → 15 → 30 → 60 → off. Checked in the main loop.
+    fn cycle_sleep(&mut self) {
+        self.sleep_until = match self.sleep_mins() {
+            0 => Some(std::time::Instant::now() + std::time::Duration::from_secs(15 * 60)),
+            15 => Some(std::time::Instant::now() + std::time::Duration::from_secs(30 * 60)),
+            30 => Some(std::time::Instant::now() + std::time::Duration::from_secs(60 * 60)),
+            _ => None,
+        };
+        self.status = match self.sleep_mins() {
+            0 => "sleep timer off".into(),
+            m => format!("sleep in {m} min (mpv quits)"),
+        };
+    }
+
+    fn sleep_mins(&self) -> u64 {
+        match self.sleep_until {
+            None => 0,
+            Some(t) => {
+                let s = t.saturating_duration_since(std::time::Instant::now()).as_secs();
+                if s > 45 * 60 { 60 } else if s > 20 * 60 { 30 } else if s > 0 { 15 } else { 0 }
+            }
+        }
     }
 
     fn cycle_sort(&mut self) {
@@ -1202,19 +1551,61 @@ impl App {
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.status = format!("▶ opening {} …", short(title));
+        // resume: continue where you left off (>10s in, <95% watched)
+        let resume = player::load_resume();
+        let start = match queue {
+            Some(_) => None,
+            None => resume.get(id).copied().filter(|s| *s > 10),
+        };
+        if let Some(s) = start {
+            self.status = format!("▶ opening {} (resume from {}:{:02}) …", short(title), s / 60, s % 60);
+        } else {
+            self.status = format!("▶ opening {} …", short(title));
+        }
         let res = match queue {
             Some(ids) => player::play_queue(&ids, &self.cfg),
-            None => player::play_with(id, &self.cfg),
+            None => player::play_with(id, &self.cfg, start),
         };
         match res {
             Ok((child, msg)) => {
                 self.mpv = Some(child);
                 self.last_play = Some(std::time::Instant::now());
                 self.last_play_id = id.to_string();
+                self.now_playing = Some((id.to_string(), self.video_secs(id)));
                 self.status = msg;
             }
             Err(e) => self.status = format!("play failed: {e}"),
+        }
+    }
+
+    /// Duration in seconds for resume-completion math (0 = unknown).
+    fn video_secs(&self, id: &str) -> u64 {
+        self.videos
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| youtube::dur_secs(&v.duration))
+            .unwrap_or(0)
+    }
+
+    /// Called from the main loop every ~5s while mpv runs: records position,
+    /// clears it past 95% watched.
+    pub fn poll_resume(&mut self) {
+        let Some((ref id, dur)) = self.now_playing.clone() else {
+            return;
+        };
+        // our player still alive?
+        let alive = self.mpv.as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
+        if !alive {
+            return;
+        }
+        if let Some(pos) = player::time_pos() {
+            let mut map = player::load_resume();
+            if dur > 0 && pos > dur as f64 * 0.95 {
+                map.remove(id);
+            } else if pos > 5.0 {
+                map.insert(id.clone(), pos as u64);
+            }
+            player::save_resume(&map);
         }
     }
 
@@ -1287,6 +1678,8 @@ impl App {
             ("Feed total".into(), self.cfg.feed_total.to_string()),
             ("Search results".into(), self.cfg.search_limit.to_string()),
             ("Downloads".into(), config::download_dir(&self.cfg).to_string_lossy().to_string()),
+            ("SponsorBlock skip".into(), onoff(self.cfg.sponsorblock)),
+            ("Subtitles".into(), onoff(self.cfg.subtitles)),
             ("Test login".into(), "→".into()),
             ("Import subs from account".into(), "→".into()),
             ("Clear thumb cache".into(), "→".into()),
@@ -1332,9 +1725,12 @@ impl App {
             7 => { self.cfg.feed_per_channel = match self.cfg.feed_per_channel { 3 => 5, 5 => 8, _ => 3 }; }
             8 => { self.cfg.feed_total = match self.cfg.feed_total { 20 => 40, 40 => 80, _ => 20 }; }
             9 => { self.cfg.search_limit = match self.cfg.search_limit { 12 => 24, 24 => 36, _ => 12 }; }
-            11 => { self.test_login(); config::save(&self.cfg); return; }
-            12 => { self.import_subs(); config::save(&self.cfg); return; }
-            13 => {
+            10 => {}
+            11 => { self.cfg.sponsorblock = !self.cfg.sponsorblock; }
+            12 => { self.cfg.subtitles = !self.cfg.subtitles; }
+            13 => { self.test_login(); config::save(&self.cfg); return; }
+            14 => { self.import_subs(); config::save(&self.cfg); return; }
+            15 => {
                 let _ = std::fs::remove_dir_all(thumb::thumb_dir());
                 self.img_protos.clear();
                 self.thumb_cache.clear();
@@ -1477,6 +1873,23 @@ impl App {
         }
     }
 
+    pub fn play_related(&mut self, k: usize) {
+        let vids = match &self.overlay {
+            Some(Overlay::Info { related, .. }) => related.clone(),
+            _ => return,
+        };
+        let Some(v) = vids.get(k).cloned() else { return };
+        config::push_history(&self.cfg, &v.id, &v.title, &v.channel);
+        // make it selectable in Home too
+        if !self.videos.iter().any(|x| x.id == v.id) {
+            self.videos.push(v.clone());
+        }
+        let id = v.id.clone();
+        let title = v.title.clone();
+        self.overlay = None;
+        self.launch(&id, &title, None);
+    }
+
     fn engage(&mut self, f: fn(&config::Config, &str) -> Result<String, String>, id: String, _icon: &str) {
         self.status = "syncing with your account…".into();
         let cfg = self.cfg.clone();
@@ -1530,4 +1943,16 @@ fn short(s: &str) -> String {
 
 fn inside(r: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) || b == b' ' {
+            if b == b' ' { o.push('+'); } else { o.push(b as char); }
+        } else {
+            o.push_str(&format!("%{b:02X}"));
+        }
+    }
+    o
 }

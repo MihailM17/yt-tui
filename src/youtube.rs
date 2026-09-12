@@ -160,6 +160,11 @@ fn view_key(s: &str) -> u64 {
 }
 
 fn dur_key(s: &str) -> u64 {
+    dur_secs(s)
+}
+
+/// "m:ss" / "h:mm:ss" -> seconds (0 when unknown).
+pub fn dur_secs(s: &str) -> u64 {
     // "m:ss" or "h:mm:ss" -> seconds
     let parts: Vec<u64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
     parts.iter().fold(0, |a, b| a * 60 + b)
@@ -386,6 +391,7 @@ pub struct VideoInfo {
     pub date: String,
     pub duration: String,
     pub desc: String,
+    pub channel_url: String,
     pub chapters: Vec<(String, String)>,
 }
 
@@ -426,6 +432,7 @@ pub fn video_info(video_id: &str) -> Result<VideoInfo, String> {
         views, likes, date,
         duration: v.get("duration").and_then(|x| x.as_f64()).map(fmt_dur).unwrap_or_default(),
         desc: strf("description"), chapters,
+        channel_url: strf("channel_url"),
     })
 }
 

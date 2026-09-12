@@ -19,6 +19,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::App;
 
+fn config_marker() -> std::path::PathBuf {
+    config::base_dir().join(".welcomed")
+}
+
 fn main() -> io::Result<()> {
     // Detect image protocol BEFORE raw mode / alternate screen: the query
     // writes an escape to stdout and reads the terminal's reply on stdin.
@@ -54,8 +58,28 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> io::Result<()> {
+    // first run: explain keys once (marker file, Help overlay)
+    let welcome = config_marker();
+    if !welcome.exists() {
+        app.overlay = Some(app::Overlay::Help);
+        let _ = std::fs::create_dir_all(config::base_dir());
+        let _ = std::fs::write(&welcome, b"1");
+    }
+    let mut tick: u64 = 0;
     loop {
         app.poll();
+        // ~5s housekeeping: resume-position save + sleep timer
+        tick += 1;
+        if tick % 50 == 0 {
+            app.poll_resume();
+            if let Some(deadline) = app.sleep_until {
+                if std::time::Instant::now() >= deadline {
+                    player::quit_mpv();
+                    app.sleep_until = None;
+                    app.status = "sleep timer: player stopped".into();
+                }
+            }
+        }
         terminal.draw(|f| ui::render(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
