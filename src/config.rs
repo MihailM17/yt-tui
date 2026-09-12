@@ -22,7 +22,8 @@ pub struct Config {
     /// Browser to read YouTube cookies from for login-gated feeds
     /// (Watch Later, Liked, private subs). You stay logged in via your
     /// normal browser — the TUI never sees your password.
-    /// One of: chrome, chromium, brave, edge, firefox, safari (macOS).
+    /// One of: chrome, chromium, brave, edge, firefox, zen, safari.
+    /// Zen (Firefox fork) auto-resolves to its profile dir.
     #[serde(default = "default_browser")]
     pub browser: String,
     /// If true, yt-dlp calls add `--cookies-from-browser <browser>`.
@@ -35,6 +36,12 @@ pub struct Config {
     /// set this path here. Takes priority over `browser` when set.
     #[serde(default)]
     pub cookies_file: String,
+    /// Thumbnail resolution: "default" (120x90, ~3KB, sharp enough for cells),
+    /// "mq" (320x180, ~10KB, recommended sharper), "hq" (480x360, ~30KB),
+    /// "sd" (640x480, ~60KB). Higher = sharper on big terminals, fewer thumbs
+    /// fit in the 20MB disk cap. Needs restart + cache clear to take effect.
+    #[serde(default = "default_thumb_quality")]
+    pub thumb_quality: String,
 }
 
 fn default_player() -> String {
@@ -42,6 +49,9 @@ fn default_player() -> String {
 }
 fn default_browser() -> String {
     "chrome".into()
+}
+fn default_thumb_quality() -> String {
+    "mq".into()
 }
 fn default_true() -> bool {
     true
@@ -63,6 +73,7 @@ impl Default for Config {
             browser: default_browser(),
             use_cookies: false,
             cookies_file: String::new(),
+            thumb_quality: default_thumb_quality(),
         }
     }
 }

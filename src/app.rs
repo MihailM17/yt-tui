@@ -75,7 +75,7 @@ impl App {
         };
         let mpv_ok = player::has_mpv();
         let mut status = String::from(
-            "0 home • S subs • H history • L login • / search • click works • q quit",
+            "0 home • s subs • y hist • u login • / search • click works • q quit",
         );
         if !mpv_ok {
             status.push_str(" • mpv missing");
@@ -330,13 +330,15 @@ impl App {
         }
 
         match code {
-            // views
+            // views — lowercase aliases (no Shift needed). hjkl stay nav-only.
+            // s subs, y history (You), u login (aUth), w watch-later, t liked.
+            // Uppercase S/H/L/W/T kept for compat.
             KeyCode::Char('0') => self.set_view(View::Home),
-            KeyCode::Char('S') => self.set_view(View::Subs),
-            KeyCode::Char('H') => self.set_view(View::History),
-            KeyCode::Char('L') => self.test_login(),
-            KeyCode::Char('W') => self.load_private("later"),
-            KeyCode::Char('T') => self.load_private("liked"),
+            KeyCode::Char('s') | KeyCode::Char('S') => self.set_view(View::Subs),
+            KeyCode::Char('y') | KeyCode::Char('H') => self.set_view(View::History),
+            KeyCode::Char('u') | KeyCode::Char('L') => self.test_login(),
+            KeyCode::Char('w') | KeyCode::Char('W') => self.load_private("later"),
+            KeyCode::Char('t') | KeyCode::Char('T') => self.load_private("liked"),
             // search / feed
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -681,7 +683,7 @@ impl App {
         if let Some(cached) = self.thumb_cache.get(&key) {
             return cached.clone();
         }
-        let lines = thumb::get(&v.id, v.seed, v.hue, w.max(8), h.max(4), self.cfg.thumb_cache_mb);
+        let lines = thumb::get(&v.id, v.seed, v.hue, w.max(8), h.max(4), self.cfg.thumb_cache_mb, &self.cfg.thumb_quality);
         self.thumb_cache.insert(key.clone(), lines.clone());
         self.thumb_order.push_back(key);
         lines

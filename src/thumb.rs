@@ -52,6 +52,7 @@ pub fn thumb_dir() -> std::path::PathBuf {
 
 /// Try real thumbnail, fall back to procedural on any failure.
 /// `is_mock` ids (mock1..) always use procedural — no network.
+/// Quality from config: default/mq/hq/sd (see config.rs).
 pub fn get(
     video_id: &str,
     seed: u64,
@@ -59,11 +60,12 @@ pub fn get(
     w: u16,
     h: u16,
     cache_mb: u64,
+    quality: &str,
 ) -> Vec<Line<'static>> {
     if video_id.starts_with("mock") {
         return procedural(seed, hue, w.max(8), h.max(4));
     }
-    if let Some(bytes) = fetch_jpg(video_id, cache_mb) {
+    if let Some(bytes) = fetch_jpg(video_id, cache_mb, quality) {
         if let Some(lines) = from_jpeg(&bytes, w.max(8), h.max(4)) {
             return lines;
         }
@@ -71,10 +73,21 @@ pub fn get(
     procedural(seed, hue, w.max(8), h.max(4))
 }
 
-fn fetch_jpg(video_id: &str, cache_mb: u64) -> Option<Vec<u8>> {
+pub fn quality_file(quality: &str) -> &'static str {
+    match quality {
+        "hq" => "hqdefault.jpg",   // 480x360 ~30KB
+        "sd" => "sddefault.jpg",   // 640x480 ~60KB
+        "default" => "default.jpg", // 120x90 ~3KB
+        _ => "mqdefault.jpg",      // 320x180 ~10KB (default: sharper, still tiny)
+    }
+}
+
+fn fetch_jpg(video_id: &str, cache_mb: u64, quality: &str) -> Option<Vec<u8>> {
     let dir = thumb_dir();
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{video_id}.jpg"));
+    let qf = quality_file(quality);
+    // cache key includes quality so switching quality refetches
+    let path = dir.join(format!("{video_id}-{qf}"));
 
     if let Ok(b) = fs::read(&path) {
         if !b.is_empty() {
@@ -85,7 +98,7 @@ fn fetch_jpg(video_id: &str, cache_mb: u64) -> Option<Vec<u8>> {
     }
 
     // system curl: tiny binary, shared TLS, no rustls bloat in our binary
-    let url = format!("https://i.ytimg.com/vi/{video_id}/default.jpg");
+    let url = format!("https://i.ytimg.com/vi/{video_id}/{qf}");
     let out = Command::new("curl")
         .args(["-sL", "--max-time", "10", &url])
         .output()

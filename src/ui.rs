@@ -204,13 +204,13 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         ("⌂ Home  (0)", Some(View::Home)),
         ("", None),
         ("Subscriptions  ›", None),
-        ("◦ Manage  (S)", Some(View::Subs)),
+        ("◦ Subs  (s)", Some(View::Subs)),
         ("", None),
         ("You  ›", None),
-        ("↻ History  (H)", Some(View::History)),
-        ("◷ Watch later  (W)", None),
-        ("♡ Liked  (T)", None),
-        ("🔑 Login test  (L)", None),
+        ("↻ History  (y)", Some(View::History)),
+        ("◷ Later  (w)", None),
+        ("♡ Liked  (t)", None),
+        ("🔑 Login  (u)", None),
     ];
     let mut lines: Vec<Line> = vec![];
     let mut y = area.y;

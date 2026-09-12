@@ -8,6 +8,43 @@ use crate::{app::Video, config};
 /// Lightweight fetch via installed `yt-dlp` (no API key, no TLS in our binary).
 /// Runs in background threads (see App) so UI never blocks.
 
+/// Resolve `--cookies-from-browser` value, including `zen` (Firefox fork).
+/// Zen stores cookies at ~/Library/Application Support/zen/Profiles/*/cookies.sqlite
+/// which yt-dlp reads via the firefox backend + explicit profile dir.
+pub fn browser_spec(browser: &str) -> String {
+    if browser.eq_ignore_ascii_case("zen") {
+        if let Some(dir) = find_zen_profile() {
+            return format!("firefox:{dir}");
+        }
+        // fall back: yt-dlp will error clearly, auth_test explains cookies.txt
+        return "firefox".to_string();
+    }
+    browser.to_string()
+}
+
+fn find_zen_profile() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let base = std::path::Path::new(&home).join("Library/Application Support/zen/Profiles");
+    let rd = std::fs::read_dir(&base).ok()?;
+    // prefer profile holding cookies.sqlite, newest first
+    let mut cands: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("cookies.sqlite").exists())
+        .filter_map(|p| {
+            let mtime = p
+                .join("cookies.sqlite")
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?;
+            Some((p, mtime))
+        })
+        .collect();
+    cands.sort_by_key(|(_, t)| *t);
+    cands.pop().map(|(p, _)| p.to_string_lossy().to_string())
+}
+
 fn cookie_args(cfg: &config::Config, force: bool) -> Vec<String> {
     // cookies.txt file wins: reliable when Chrome is open or macOS keychain blocks reads
     if !cfg.cookies_file.is_empty() {
@@ -19,7 +56,7 @@ fn cookie_args(cfg: &config::Config, force: bool) -> Vec<String> {
     }
     if cfg.use_cookies || force {
         if !cfg.browser.is_empty() {
-            return vec!["--cookies-from-browser".to_string(), cfg.browser.clone()];
+            return vec!["--cookies-from-browser".to_string(), browser_spec(&cfg.browser)];
         }
     }
     vec![]
@@ -116,7 +153,7 @@ pub fn auth_test(cfg: &config::Config) -> Result<String, String> {
     } else {
         // force browser cookies for the test even if use_cookies=false
         args.push("--cookies-from-browser".to_string());
-        args.push(cfg.browser.clone());
+        args.push(browser_spec(&cfg.browser));
         src = format!("{} cookies", cfg.browser);
     }
     args.push("--playlist-end".to_string());

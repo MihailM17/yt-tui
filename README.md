@@ -25,7 +25,7 @@ Deps at runtime for playback (wired in `src/player.rs`):
 ## Keys
 
 - Mouse: click search/sidebar/videos, wheel scroll
-- `0` home • `S` subs • `H` history • `L` login test • `W` watch later • `T` liked
+- `0` home • `s` subs • `y` history • `u` login test • `w` watch later • `t` liked (lowercase, no Shift; capitals still work)
 - Subs view: `Enter` load channel • `a` add @handle • `d` remove • `r` refresh all
 - History view: `Enter` replay • `D` clear (local only)
 - Home: `hjkl`/arrows, `Enter`/`p` play, `o` browser, `/` live-search, `r` feed, `m` mock
@@ -46,8 +46,8 @@ path is cookies — the TUI never sees your password.
 
 1. Install "Get cookies.txt LOCALLY" extension (Chrome/Firefox), open youtube.com logged in, Export → save as `~/.config/yt-tui/cookies.txt`
 2. In `~/.config/yt-tui/config.json` set `"cookies_file": "~/.config/yt-tui/cookies.txt"`
-3. In yt-tui press `L` — should say `login OK via cookies file`
-4. Set `"use_cookies": true`, restart. `W`/`T` load Watch Later / Liked.
+3. In yt-tui press `u` — should say `login OK via cookies file`
+4. Set `"use_cookies": true`, restart. `w`/`t` load Watch Later / Liked.
 
 **Quick path (flaky):** quit your browser completely, set `"browser": "chrome"` (or brave/firefox — whichever holds the login), press `L`.
 
@@ -73,7 +73,7 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 
 - Rust + `ratatui` + `crossterm` + `image/jpeg-only`. No tokio, no TLS in binary, no ffmpeg linked.
 - Search/feed via installed `yt-dlp -J` in background thread (no API key). Thumbs via system `curl` + `default.jpg` (120x90, ~3KB).
-- Thumbnails: jpg → resize in RAM → block ANSI → drop image:
+- Thumbnails (`thumb_quality` in config: default/mq/hq/sd, default mq 320x180 ~10KB): jpg → aspect-fit → half-block ANSI → drop image:
   - RAM: LRU 30 entries, <500KB
   - Disk: `~/.cache/yt-tui/thumbs/`, 20MB LRU cap, auto-pruned
 - History: `~/.local/share/yt-tui/history.json`, capped 100. Config: `~/.config/yt-tui/config.json`.
