@@ -1,8 +1,10 @@
 pub mod app;
+pub mod config;
 pub mod data;
 pub mod player;
 pub mod thumb;
 pub mod ui;
+pub mod youtube;
 
 use std::io::{self, stdout};
 
@@ -40,15 +42,14 @@ fn run(
     app: &mut App,
 ) -> io::Result<()> {
     loop {
+        app.poll();
         terminal.draw(|f| ui::render(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                // global quit
-                if key.code == KeyCode::Char('q')
-                    && !app.searching
-                    || key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                if (key.code == KeyCode::Char('q') && !app.searching)
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     break;
                 }
@@ -59,7 +60,6 @@ fn run(
             }
         }
 
-        // prune thumb cache so RAM stays flat (~30 entries max)
         app.prune_thumb_cache();
     }
     Ok(())

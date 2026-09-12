@@ -18,6 +18,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
+    // remember cols for vim nav (set again in render_grid)
+    app.cols = if area.width >= 178 { 3 } else if area.width >= 128 { 2 } else { 1 };
+
     // outer: header / chips / main / status
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -50,8 +53,15 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_grid(f, app, main_chunks[0]);
     }
 
+    let status_txt = if app.loading {
+        " ⟳ loading via yt-dlp… (UI stays responsive)".to_string()
+    } else if app.live {
+        format!(" ●LIVE  {}", past_status(app))
+    } else {
+        format!(" ○MOCK  {}", past_status(app))
+    };
     let status = Paragraph::new(Line::from(vec![Span::styled(
-        format!(" {}", past_status(app)),
+        format!(" {status_txt}"),
         Style::default().fg(DIM),
     )]))
     .style(Style::default().bg(BG));
@@ -216,6 +226,7 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         1
     };
+    app.cols = cols;
     let rows: usize = 3;
     let row_h = area.height / rows.max(1) as u16;
 

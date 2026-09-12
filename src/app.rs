@@ -1,9 +1,10 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::{self, Receiver};
 
 use ratatui::text::Line;
 
-use crate::{data, player, thumb};
+use crate::{config, data, player, thumb, youtube};
 
 #[derive(Clone)]
 pub struct Video {
@@ -14,17 +15,16 @@ pub struct Video {
     pub views: String,
     pub age: String,
     pub duration: String,
-    /// 0-255 hue seed for procedural ASCII thumb (no image download in MVP)
     pub hue: u8,
     pub seed: u64,
 }
 
 pub struct App {
     pub videos: Vec<Video>,
-    /// indices into `videos` after search filter
     pub filtered: Vec<usize>,
     pub selected: usize,
     pub row_offset: usize,
+    pub cols: usize,
     pub chips: Vec<String>,
     pub active_chip: usize,
     pub subs: Vec<(String, bool)>,
@@ -32,39 +32,93 @@ pub struct App {
     pub searching: bool,
     pub status: String,
     pub should_quit: bool,
-    /// thumb cache: video.id -> rendered lines. LRU-ish via insertion order.
-    /// Capped at 30 entries, each ~8 lines -> <500KB. Disk cache intentionally
-    /// omitted in MVP (zero storage); add 20MB capped on-disk ANSI cache later.
+    pub loading: bool,
+    pub live: bool,
+    pub cfg: config::Config,
+    rx: Option<Receiver<Result<Vec<Video>, String>>>,
     thumb_cache: HashMap<String, Vec<Line<'static>>>,
     thumb_order: VecDeque<String>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let cfg = config::load();
         let videos = data::mock_videos();
         let filtered = (0..videos.len()).collect();
+        let subs = if cfg.subscriptions.is_empty() {
+            data::subs()
+        } else {
+            cfg.subscriptions
+                .iter()
+                .map(|s| (s.clone(), false))
+                .collect()
+        };
+        let mpv_ok = player::has_mpv();
+        let mut status = String::from(
+            "hjkl navigate • Enter play • / live-search • r feed • q quit",
+        );
+        if !mpv_ok {
+            status.push_str(" • mpv missing (brew install mpv or Enter opens browser)");
+        }
         Self {
             videos,
             filtered,
             selected: 0,
             row_offset: 0,
+            cols: 3,
             chips: data::chips(),
             active_chip: 0,
-            subs: data::subs(),
+            subs,
             query: String::new(),
             searching: false,
-            status: String::from(
-                "hjkl/arrows navigate • Enter play (mpv) • / search • 1-9 chips • q quit",
-            ),
+            status,
             should_quit: false,
+            loading: false,
+            live: false,
+            cfg,
+            rx: None,
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
         }
     }
 
-    pub fn visible_count(&self, cols: usize) -> usize {
-        // show 3 rows like the mockup; scroll for the rest
-        cols * 3
+    /// Non-blocking poll for background fetch results. Call each frame.
+    pub fn poll(&mut self) {
+        let done = if let Some(rx) = &self.rx {
+            match rx.try_recv() {
+                Ok(Ok(vids)) => {
+                    self.loading = false;
+                    if vids.is_empty() {
+                        self.status = "no results (try another query)".into();
+                    } else {
+                        self.videos = vids;
+                        self.filtered = (0..self.videos.len()).collect();
+                        self.selected = 0;
+                        self.row_offset = 0;
+                        self.live = true;
+                        self.thumb_cache.clear();
+                        self.thumb_order.clear();
+                        self.status = format!("{} live results • Enter plays via mpv", self.videos.len());
+                    }
+                    true
+                }
+                Ok(Err(e)) => {
+                    self.loading = false;
+                    self.status = format!("fetch failed: {e}");
+                    true
+                }
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.loading = false;
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if done {
+            self.rx = None;
+        }
     }
 
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -74,8 +128,13 @@ impl App {
                     self.searching = false;
                 }
                 KeyCode::Enter => {
+                    let q = self.query.clone();
                     self.searching = false;
-                    self.apply_filter();
+                    if q.len() >= 2 {
+                        self.live_search(q);
+                    } else {
+                        self.apply_filter();
+                    }
                 }
                 KeyCode::Backspace => {
                     self.query.pop();
@@ -96,6 +155,19 @@ impl App {
             KeyCode::Char('/') => {
                 self.searching = true;
             }
+            KeyCode::Char('r') => self.load_feed(),
+            KeyCode::Char('m') => {
+                // back to offline mock (zero network, zero storage)
+                self.videos = data::mock_videos();
+                self.filtered = (0..self.videos.len()).collect();
+                self.selected = 0;
+                self.row_offset = 0;
+                self.live = false;
+                self.query.clear();
+                self.thumb_cache.clear();
+                self.thumb_order.clear();
+                self.status = "offline mock feed (press / to live-search)".into();
+            }
             KeyCode::Esc => {
                 if !self.query.is_empty() {
                     self.query.clear();
@@ -103,11 +175,11 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Char('p') => self.play_selected(),
-            // vim + arrows
-            KeyCode::Char('h') | KeyCode::Left => self.move_sel(-1, 3),
-            KeyCode::Char('l') | KeyCode::Right => self.move_sel(1, 3),
-            KeyCode::Char('k') | KeyCode::Up => self.move_sel(-3, 3),
-            KeyCode::Char('j') | KeyCode::Down => self.move_sel(3, 3),
+            KeyCode::Char('o') => self.open_selected(),
+            KeyCode::Char('h') | KeyCode::Left => self.move_sel(-1),
+            KeyCode::Char('l') | KeyCode::Right => self.move_sel(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_sel(-(self.cols as isize)),
+            KeyCode::Char('j') | KeyCode::Down => self.move_sel(self.cols as isize),
             KeyCode::Char('g') => {
                 self.selected = 0;
                 self.row_offset = 0;
@@ -125,23 +197,19 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                // cycle chips like YouTube topic bar
                 self.active_chip = (self.active_chip + 1) % self.chips.len();
             }
             _ => {}
         }
     }
 
-    fn move_sel(&mut self, delta: isize, cols: usize) {
+    fn move_sel(&mut self, delta: isize) {
         if self.filtered.is_empty() {
             return;
         }
+        let cols = self.cols.max(1);
         let n = self.filtered.len() as isize;
-        let mut s = self.selected as isize + delta;
-        s = s.clamp(0, n - 1);
-        self.selected = s as usize;
-
-        // keep selection inside visible 3-row window
+        self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
         let row = self.selected / cols;
         let vis_rows = 3;
         if row < self.row_offset {
@@ -169,11 +237,56 @@ impl App {
         }
         self.selected = 0;
         self.row_offset = 0;
-        self.status = if self.filtered.is_empty() {
-            format!("no results for \"{}\"", self.query)
-        } else {
-            format!("{} results", self.filtered.len())
-        };
+        if !self.live {
+            self.status = format!("{} results (local filter — Enter for live search)", self.filtered.len());
+        }
+    }
+
+    pub fn live_search(&mut self, q: String) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
+        self.status = format!("searching \"{q}\" via yt-dlp…");
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = youtube::search(&q, 12);
+            let _ = tx.send(res);
+        });
+    }
+
+    pub fn load_feed(&mut self) {
+        if self.loading {
+            return;
+        }
+        let subs = self.cfg.subscriptions.clone();
+        if subs.is_empty() {
+            self.status = "no subscriptions in ~/.config/yt-tui/config.json".into();
+            return;
+        }
+        self.loading = true;
+        self.status = format!("loading feed ({} subs) via yt-dlp…", subs.len());
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut all = vec![];
+            for s in subs.iter().take(6) {
+                let url = if s.starts_with('@') {
+                    format!("https://www.youtube.com/{s}/videos")
+                } else {
+                    s.clone()
+                };
+                if let Ok(mut v) = youtube::channel_videos(&url, 4) {
+                    all.append(&mut v);
+                }
+                if all.len() >= 18 {
+                    break;
+                }
+            }
+            // interleave so one channel doesn't dominate
+            let _ = tx.send(Ok(all));
+        });
     }
 
     fn play_selected(&mut self) {
@@ -181,31 +294,41 @@ impl App {
             return;
         };
         let v = &self.videos[vi];
-        // MVP: mock ids are not playable; real ids go through yt-dlp + mpv.
         if v.id.starts_with("mock") {
             self.status = format!(
-                "▶ {} — mock entry (wire real videoId to play via mpv)",
-                v.title.lines().next().unwrap_or(&v.title)
+                "▶ {} — mock entry (press / + Enter for playable results)",
+                v.title.chars().take(60).collect::<String>()
             );
             return;
         }
-        self.status = format!("▶ resolving {} …", v.title);
+        config::push_history(&self.cfg, &v.id, &v.title);
+        self.status = format!("▶ resolving {} …", short(&v.title));
         match player::play(&v.id) {
             Ok(msg) => self.status = msg,
             Err(e) => self.status = format!("play failed: {e}"),
         }
     }
 
-    /// Get (cached) procedural ASCII thumb for a video.
-    /// Real implementation later: download `default.jpg` (120x90),
-    /// convert to half-block ANSI, cache text. Same call site.
+    fn open_selected(&mut self) {
+        let Some(&vi) = self.filtered.get(self.selected) else {
+            return;
+        };
+        let v = &self.videos[vi];
+        if v.id.starts_with("mock") {
+            return;
+        }
+        let url = format!("https://www.youtube.com/watch?v={}", v.id);
+        player::open_browser(&url);
+        self.status = format!("opened {url}");
+    }
+
     pub fn thumb(&mut self, video_idx: usize, w: u16, h: u16) -> Vec<Line<'static>> {
         let v = &self.videos[video_idx];
         let key = format!("{}-{}x{}", v.id, w, h);
         if let Some(cached) = self.thumb_cache.get(&key) {
             return cached.clone();
         }
-        let lines = thumb::procedural(v.seed, v.hue, w.max(8), h.max(4));
+        let lines = thumb::get(&v.id, v.seed, v.hue, w.max(8), h.max(4), self.cfg.thumb_cache_mb);
         self.thumb_cache.insert(key.clone(), lines.clone());
         self.thumb_order.push_back(key);
         lines
@@ -220,4 +343,8 @@ impl App {
             }
         }
     }
+}
+
+fn short(s: &str) -> String {
+    s.chars().take(50).collect()
 }
