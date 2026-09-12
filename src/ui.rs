@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Overlay, SidebarAction, TransportAction, View};
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 
 const BG: Color = Color::Rgb(10, 14, 22);
 const PANEL: Color = Color::Rgb(16, 22, 34);
@@ -460,7 +460,8 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     let th = thumb_area.height.saturating_sub(1);
     let proto = app.img_proto(&v.id, tw, th.max(4));
     if let Some(state) = proto {
-        f.render_stateful_widget(StatefulImage::new(), thumb_area, state);
+        // Scale (not Fit): small mq thumbs upscale to fill the card like youtube.com
+        f.render_stateful_widget(StatefulImage::new().resize(Resize::Scale(None)), thumb_area, state);
     } else {
         let lines = app.thumb(video_idx, tw, th);
         f.render_widget(Paragraph::new(lines), thumb_area);

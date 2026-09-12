@@ -54,15 +54,18 @@ pub fn thumb_dir() -> std::path::PathBuf {
 /// None for mock entries or any fetch/decode failure (caller falls back).
 pub fn load_dynamic(
     video_id: &str,
-    cache_mb: u64,
+    _cache_mb: u64,
     quality: &str,
 ) -> Option<image::DynamicImage> {
     if video_id.starts_with("mock") {
         return None;
     }
-    let bytes = fetch_jpg(video_id, cache_mb, quality)?;
+    let bytes = read_cached(video_id, quality)?;
     image::load_from_memory(&bytes).ok()
 }
+
+/// Render-path thumbnail source: DISK ONLY, never network.
+/// Warmed in background by `warm_all` after each feed/search.
 
 /// Try real thumbnail, fall back to procedural on any failure.
 /// `is_mock` ids (mock1..) always use procedural — no network.
@@ -76,10 +79,11 @@ pub fn get(
     cache_mb: u64,
     quality: &str,
 ) -> Vec<Line<'static>> {
+    let _ = cache_mb; // cap enforced by background warmer, not render path
     if video_id.starts_with("mock") {
         return procedural(seed, hue, w.max(8), h.max(4));
     }
-    if let Some(bytes) = fetch_jpg(video_id, cache_mb, quality) {
+    if let Some(bytes) = read_cached(video_id, quality) {
         if let Some(lines) = from_jpeg(&bytes, w.max(8), h.max(4)) {
             return lines;
         }
@@ -96,33 +100,61 @@ pub fn quality_file(quality: &str) -> &'static str {
     }
 }
 
-fn fetch_jpg(video_id: &str, cache_mb: u64, quality: &str) -> Option<Vec<u8>> {
+fn read_cached(video_id: &str, quality: &str) -> Option<Vec<u8>> {
     let dir = thumb_dir();
-    let _ = fs::create_dir_all(&dir);
-    let qf = quality_file(quality);
-    // cache key includes quality so switching quality refetches
-    let path = dir.join(format!("{video_id}-{qf}"));
-
+    let path = dir.join(format!("{}-{}", video_id, quality_file(quality)));
     if let Ok(b) = fs::read(&path) {
         if !b.is_empty() {
-            // touch mtime for LRU
             let _ = file_touch(&path);
             return Some(b);
         }
     }
+    None
+}
 
-    // system curl: tiny binary, shared TLS, no rustls bloat in our binary
-    let url = format!("https://i.ytimg.com/vi/{video_id}/{qf}");
-    let out = Command::new("curl")
-        .args(["-sL", "--max-time", "10", &url])
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.len() < 500 {
-        return None;
+/// Background pre-fetcher: downloads jpgs missing from disk.
+/// Call once per feed/search in a worker thread — NEVER on the render path
+/// (render-time curl was freezing the UI ~200ms per new thumb).
+pub fn warm_all(ids: &[String], cache_mb: u64, quality: &str) {
+    let dir = thumb_dir();
+    let _ = fs::create_dir_all(&dir);
+    let qf = quality_file(quality);
+    let missing: Vec<String> = ids
+        .iter()
+        .take(40)
+        .filter(|id| !id.starts_with("mock") && !dir.join(format!("{id}-{qf}")).exists())
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
     }
-    let _ = fs::write(&path, &out.stdout);
+    // 6 curl workers: whole grid (~9 files x 10KB) in ~1s
+    let chunks: Vec<Vec<String>> = missing
+        .chunks((missing.len() / 6).max(1))
+        .map(|c| c.to_vec())
+        .collect();
+    let mut handles = vec![];
+    for chunk in chunks {
+        let dir = dir.clone();
+        let qf = qf.to_string();
+        handles.push(std::thread::spawn(move || {
+            for id in chunk {
+                let url = format!("https://i.ytimg.com/vi/{id}/{qf}");
+                if let Ok(out) = Command::new("curl")
+                    .args(["-sL", "--max-time", "10", &url])
+                    .output()
+                {
+                    if out.status.success() && out.stdout.len() > 500 {
+                        let _ = fs::write(dir.join(format!("{id}-{qf}")), &out.stdout);
+                    }
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
     enforce_cap(&dir, cache_mb);
-    Some(out.stdout)
 }
 
 fn from_jpeg(bytes: &[u8], w_cells: u16, h_rows: u16) -> Option<Vec<Line<'static>>> {

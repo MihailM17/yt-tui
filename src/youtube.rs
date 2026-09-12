@@ -318,9 +318,19 @@ pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
 
 pub fn fmt_views(n: u64) -> String {
     if n >= 1_000_000 {
-        format!("{:.1}M views", n as f64 / 1_000_000.0)
+        let v = n as f64 / 1_000_000.0;
+        if v.fract() == 0.0 {
+            format!("{v:.0}M views")
+        } else {
+            format!("{v:.1}M views")
+        }
     } else if n >= 1_000 {
-        format!("{:.1}K views", n as f64 / 1_000.0)
+        let v = n as f64 / 1_000.0;
+        if v.fract() == 0.0 {
+            format!("{v:.0}K views")
+        } else {
+            format!("{v:.1}K views")
+        }
     } else if n == 0 {
         String::new()
     } else {

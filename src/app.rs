@@ -8,9 +8,8 @@ use crate::{config, data, player, thumb, youtube};
 use crate::youtube::{SortMode, VideoInfo, Comment};
 use ratatui_image::{picker::{Picker, ProtocolType}, protocol::StatefulProtocol};
 
-#[derive(Clone)]
-pub struct Video {
-    pub id: String,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Video {    pub id: String,
     pub title: String,
     pub channel: String,
     pub verified: bool,
@@ -93,6 +92,9 @@ pub struct App {
     rx_dl: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     rx_new: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     rx_import: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    mpv: Option<std::process::Child>,
+    last_play: Option<std::time::Instant>,
+    last_play_id: String,
     pub picker: Option<Picker>,
     img_protos: std::collections::HashMap<String, StatefulProtocol>,
     pub settings_sel: usize,
@@ -123,7 +125,7 @@ impl App {
         if !mpv_ok {
             status.push_str(" • mpv missing");
         }
-        Self {
+        let mut app = Self {
             view: View::Home,
             videos,
             filtered,
@@ -164,6 +166,9 @@ impl App {
             rx_dl: None,
             rx_new: None,
             rx_import: None,
+            mpv: None,
+            last_play: None,
+            last_play_id: String::new(),
             picker,
             img_protos: std::collections::HashMap::new(),
             settings_sel: 0,
@@ -172,7 +177,10 @@ impl App {
             gear_rect: Rect::default(),
             transport_hits: vec![],
             hover: None,
-        }
+        };
+        // instant startup: show last feed from disk (<15min old), bg refresh anyway
+        app.load_cached_feed();
+        app
     }
 
     /// Real images only when mode allows AND terminal speaks kitty/sixel/iterm.
@@ -258,6 +266,12 @@ impl App {
                             "{} results • j/k or wheel scrolls (3 rows visible) • Enter plays",
                             self.videos.len()
                         );
+                        // warm jpg cache in background so thumbs pop in without render jank
+                        let ids: Vec<String> =
+                            self.videos.iter().map(|v| v.id.clone()).collect();
+                        let (cmb, q) =
+                            (self.cfg.thumb_cache_mb, self.cfg.thumb_quality.clone());
+                        std::thread::spawn(move || thumb::warm_all(&ids, cmb, &q));
                     }
                     true
                 }
@@ -362,7 +376,7 @@ impl App {
                     self.loading = false;
                     let mut added = 0;
                     for ch in channels {
-                        if !self.cfg.subscriptions.iter().any(|s| s == &ch) {
+                        if !self.cfg.subscriptions.iter().any(|s| s.to_lowercase() == ch.to_lowercase()) {
                             self.cfg.subscriptions.push(ch.clone());
                             added += 1;
                         }
@@ -815,58 +829,76 @@ impl App {
             return;
         }
         self.loading = true;
-        self.status = format!("loading feed ({} subs, {} each)…", subs.len(), cfg.feed_per_channel);
+        self.status = format!("loading feed ({} subs in parallel)…", subs.len());
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            // fetch ALL subs (no take(6) cap), then round-robin interleave so
-            // one channel can't dominate, capped at feed_total.
-            let mut per: Vec<Vec<crate::app::Video>> = vec![];
-            let mut failed = 0usize;
+            // parallel: one yt-dlp per channel (~2-4s each → wall time of slowest)
+            let mut handles = vec![];
             for s in subs.iter() {
                 let url = if s.starts_with('@') {
                     format!("https://www.youtube.com/{s}/videos")
                 } else {
                     s.clone()
                 };
-                match youtube::channel_videos(&cfg, &url, cfg.feed_per_channel) {
-                    Ok(v) if !v.is_empty() => per.push(v),
-                    _ => {
-                        failed += 1;
-                        // keep a placeholder-free gap: push empty so interleave skips
-                        per.push(vec![]);
-                    }
-                }
+                let cfg = cfg.clone();
+                let per = cfg.feed_per_channel;
+                handles.push(std::thread::spawn(move || {
+                    youtube::channel_videos(&cfg, &url, per).unwrap_or_default()
+                }));
             }
+            let mut per: Vec<Vec<crate::app::Video>> = vec![];
+            for h in handles {
+                per.push(h.join().unwrap_or_default());
+            }
+            let failed = per.iter().filter(|v| v.is_empty()).count();
+            // round-robin interleave so one channel can't dominate
             let total_cap = cfg.feed_total.max(9);
             let mut all = Vec::with_capacity(total_cap);
             let depth = per.iter().map(|v| v.len()).max().unwrap_or(0);
-            for i in 0..depth {
+            'outer: for i in 0..depth {
                 for ch in per.iter() {
                     if let Some(v) = ch.get(i) {
                         all.push(v.clone());
                         if all.len() >= total_cap {
-                            break;
+                            break 'outer;
                         }
                     }
                 }
-                if all.len() >= total_cap {
-                    break;
-                }
             }
-            let ok_subs = per.iter().filter(|v| !v.is_empty()).count();
             if all.is_empty() {
                 let _ = tx.send(Err(format!(
                     "feed empty — {failed}/{} channels failed (private/renamed? try one with Enter in S view)",
                     subs.len()
                 )));
             } else {
-                // stash counts in first video? No — encode via status in poll.
-                // Send videos; poll formats counts from len. Failures logged to status below.
+                save_feed_cache(&all);
                 let _ = tx.send(Ok(all));
-                let _ = (ok_subs, failed);
             }
         });
+    }
+
+    /// Instant startup: show last feed from disk if <15min old.
+    fn load_cached_feed(&mut self) {
+        let p = config::cache_dir().join("feed.json");
+        let Ok(bytes) = std::fs::read(&p) else {
+            return;
+        };
+        let Ok(cached): Result<CachedFeed, _> = serde_json::from_slice(&bytes) else {
+            return;
+        };
+        let age = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(cached.saved_at);
+        if age > 15 * 60 || cached.videos.is_empty() {
+            return;
+        }
+        self.videos = cached.videos;
+        self.filtered = (0..self.videos.len()).collect();
+        self.live = true;
+        self.status = format!("{} cached videos • refreshing…", self.videos.len());
     }
 
     fn load_selected_sub(&mut self) {
@@ -903,7 +935,7 @@ impl App {
         if h.is_empty() {
             return;
         }
-        if !self.cfg.subscriptions.iter().any(|s| s == &h) {
+        if !self.cfg.subscriptions.iter().any(|s| s.to_lowercase() == h.to_lowercase()) {
             self.cfg.subscriptions.push(h.clone());
             config::save(&self.cfg);
             self.subs.push((h.clone(), false));
@@ -930,10 +962,8 @@ impl App {
             return;
         };
         config::push_history(&self.cfg, &e.id, &e.title, &e.channel);
-        match player::play_with(&e.id, &self.cfg) {
-            Ok(msg) => self.status = msg,
-            Err(err) => self.status = format!("play failed: {err}"),
-        }
+        let (id, title) = (e.id.clone(), e.title.clone());
+        self.launch(&id, &title, None);
     }
 
     pub fn test_login(&mut self) {
@@ -1035,10 +1065,12 @@ impl App {
 
     fn play_queue(&mut self) {
         let ids: Vec<String> = self.queue.iter().map(|v| v.id.clone()).collect();
-        match player::play_queue(&ids, &self.cfg) {
-            Ok(msg) => self.status = msg,
-            Err(e) => self.status = format!("queue failed: {e}"),
+        if ids.is_empty() {
+            self.status = "queue empty — press a on videos to add".into();
+            return;
         }
+        let first = ids[0].clone();
+        self.launch(&first, "queue", Some(ids));
     }
 
     fn start_download(&mut self, audio_only: bool) {
@@ -1108,6 +1140,40 @@ impl App {
         }
     }
 
+    /// Single player window: kills the previous mpv (if ours is still alive),
+    /// debounces double-clicks, and reports state immediately so you never
+    /// wonder "did it open?".
+    fn launch(&mut self, id: &str, title: &str, queue: Option<Vec<String>>) {
+        // debounce: same video twice within 2s = one launch
+        if self.last_play_id == id {
+            if let Some(t) = self.last_play {
+                if t.elapsed() < std::time::Duration::from_secs(2) {
+                    self.status = "already opening… (one player window)".into();
+                    return;
+                }
+            }
+        }
+        // single instance: close our previous player first
+        if let Some(mut child) = self.mpv.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.status = format!("▶ opening {} …", short(title));
+        let res = match queue {
+            Some(ids) => player::play_queue(&ids, &self.cfg),
+            None => player::play_with(id, &self.cfg),
+        };
+        match res {
+            Ok((child, msg)) => {
+                self.mpv = Some(child);
+                self.last_play = Some(std::time::Instant::now());
+                self.last_play_id = id.to_string();
+                self.status = msg;
+            }
+            Err(e) => self.status = format!("play failed: {e}"),
+        }
+    }
+
     fn play_selected(&mut self) {
         let Some(&vi) = self.filtered.get(self.selected) else {
             return;
@@ -1121,11 +1187,8 @@ impl App {
             return;
         }
         config::push_history(&self.cfg, &v.id, &v.title, &v.channel);
-        self.status = format!("▶ resolving {} …", short(&v.title));
-        match player::play_with(&v.id, &self.cfg) {
-            Ok(msg) => self.status = msg,
-            Err(e) => self.status = format!("play failed: {e}"),
-        }
+        let (id, title) = (v.id.clone(), v.title.clone());
+        self.launch(&id, &title, None);
     }
 
     fn open_selected(&mut self) {
@@ -1265,6 +1328,28 @@ impl App {
             Err(_) => self.status = "mpv not playing".into(),
         }
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedFeed {
+    saved_at: u64,
+    videos: Vec<Video>,
+}
+
+fn save_feed_cache(videos: &[Video]) {
+    let saved_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cached = CachedFeed {
+        saved_at,
+        videos: videos.to_vec(),
+    };
+    let _ = std::fs::create_dir_all(config::cache_dir());
+    let _ = std::fs::write(
+        config::cache_dir().join("feed.json"),
+        serde_json::to_string(&cached).unwrap_or_default(),
+    );
 }
 
 fn short(s: &str) -> String {

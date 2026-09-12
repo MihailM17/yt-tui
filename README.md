@@ -76,13 +76,13 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 ## Efficient by design (low RAM/storage)
 
 - Rust + `ratatui` + `crossterm` + `image/jpeg-only`. No tokio, no TLS in binary, no ffmpeg linked.
-- Search/feed via installed `yt-dlp -J` in background thread (no API key). Thumbs via system `curl` + `default.jpg` (120x90, ~3KB).
+- Search/feed via installed `yt-dlp -J` in background threads (all channels in parallel, no API key). Last feed cached 15min for instant startup. Thumbs warmed in background (render path is disk-only, never blocks).
 - Thumbnails (`thumb_quality` in config: default/mq/hq/sd, default mq 320x180 ~10KB): jpg → aspect-fit → half-block ANSI → drop image:
   - RAM: LRU 30 entries, <500KB
   - Disk: `~/.cache/yt-tui/thumbs/`, 20MB LRU cap, auto-pruned
 - History: `~/.local/share/yt-tui/history.json`, capped 100. Config: `~/.config/yt-tui/config.json`.
 - Redraw on input, 10fps poll, only visible 9 cards rendered.
-- Release: `opt-level=z, lto, strip` → 754K binary (measured), ~10-20MB idle RAM.
+- Release: `opt-level=z, lto, strip` → ~1.2MB binary (kitty/sixel included), ~15-30MB idle RAM.
 
 ## Roadmap
 

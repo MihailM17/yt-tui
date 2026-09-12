@@ -21,11 +21,11 @@ pub fn has_mpv() -> bool {
 ///   set `"player": "iina"` in ~/.config/yt-tui/config.json.
 /// - "vlc": familiar GUI, heavier (~100MB+).
 /// - "browser": just open YouTube (keeps ads, zero setup).
-pub fn play(video_id: &str) -> Result<String, String> {
+pub fn play(video_id: &str) -> Result<(std::process::Child, String), String> {
     play_with(video_id, &crate::config::load())
 }
 
-pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String> {
+pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<(std::process::Child, String), String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
 
     // NOTE (audio fix): `yt-dlp -g` returns 2 URLs — video-only + audio-only —
@@ -37,8 +37,8 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
     let player = cfg.player.to_lowercase();
     match player.as_str() {
         "browser" => {
-            open_browser(&url);
-            return Ok("opened in browser".into());
+            let child = open_browser(&url);
+            return Ok((child, "opened in browser".into()));
         }
         "iina" => {
             match single_file_url(&url) {
@@ -49,7 +49,13 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
                         .stderr(Stdio::null())
                         .status();
                     if st.map(|s| s.success()).unwrap_or(false) {
-                        return Ok(format!("▶ playing {video_id} via IINA (with audio)"));
+                        let dummy = Command::new("sleep")
+                            .arg("0")
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                            .map_err(|e| e.to_string())?;
+                        return Ok((dummy, format!("▶ playing {video_id} via IINA (with audio)")));
                     }
                 }
                 Err(e) => return Err(e),
@@ -65,8 +71,8 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn();
-                    if st.is_ok() {
-                        return Ok(format!("▶ playing {video_id} via vlc (with audio)"));
+                    if let Ok(child) = st {
+                        return Ok((child, format!("▶ playing {video_id} via vlc (with audio)")));
                     }
                 }
                 Err(e) => return Err(e),
@@ -96,14 +102,13 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
         }
         cmd.args(&cfg.player_args);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        cmd.spawn()
-            .map_err(|e| format!("mpv spawn failed ({e})"))?;
-        return Ok(format!("▶ playing {video_id} via mpv (no ads)"));
+        let child = cmd.spawn().map_err(|e| format!("mpv spawn failed ({e})"))?;
+        return Ok((child, format!("▶ playing {video_id} via mpv (no ads)")));
     }
 
-    // graceful fallback on machines without mpv (like this Mac right now)
-    open_browser(&url);
-    Ok("mpv not found — opened in browser instead (brew install mpv)".into())
+    // graceful fallback when mpv is missing
+    let child = open_browser(&url);
+    Ok((child, "mpv not found — opened in browser instead (brew install mpv)".into()))
 }
 
 /// Single progressive file URL (video+audio in one stream, <=720p).
@@ -180,7 +185,7 @@ pub fn ipc_speed(delta: f64) -> Result<String, String> {
 }
 
 /// Play a queue of ids natively in mpv (autoplay-next free via playlist).
-pub fn play_queue(ids: &[String], cfg: &config::Config) -> Result<String, String> {
+pub fn play_queue(ids: &[String], cfg: &config::Config) -> Result<(std::process::Child, String), String> {
     if ids.is_empty() { return Err("queue empty — press a on videos to add".into()); }
     if !has_mpv() { return Err("mpv not found".into()); }
     let mut cmd = Command::new("mpv");
@@ -195,8 +200,8 @@ pub fn play_queue(ids: &[String], cfg: &config::Config) -> Result<String, String
     }
     cmd.args(&cfg.player_args);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    cmd.spawn().map_err(|e| format!("mpv spawn failed ({e})"))?;
-    Ok(format!("▶ queue: {} videos (mpv playlist, no ads)", ids.len().min(25)))
+    let child = cmd.spawn().map_err(|e| format!("mpv spawn failed ({e})"))?;
+    Ok((child, format!("▶ queue: {} videos (mpv playlist, no ads)", ids.len().min(25))))
 }
 
 /// Download video (or audio-only) to download_dir in background.
@@ -220,13 +225,28 @@ pub fn download(video_id: &str, audio_only: bool, cfg: &config::Config) -> std::
     rx
 }
 
-pub fn open_browser(url: &str) {
+pub fn open_browser(url: &str) -> std::process::Child {
     #[cfg(target_os = "macos")]
-    let _ = Command::new("open").arg(url).spawn();
+    let child = Command::new("open").arg(url).spawn();
     #[cfg(target_os = "linux")]
-    let _ = Command::new("xdg-open").arg(url).spawn();
+    let child = Command::new("xdg-open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let _ = Command::new("cmd").args(["/C", "start", url]).spawn();
+    let child = Command::new("cmd").args(["/C", "start", url]).spawn();
+    // never panic the TUI: fall back to an already-exited dummy child
+    child.or_else(|_| {
+        Command::new("true")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    })
+    .or_else(|_| {
+        Command::new("sleep")
+            .arg("0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    })
+    .expect("no process spawner available")
 }
 
 #[allow(dead_code)]
