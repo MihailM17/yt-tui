@@ -79,8 +79,10 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
     if has_mpv() {
         let mut cmd = Command::new("mpv");
         cmd.arg(&url).arg(format!("--title={video_id}"));
-        // merge audio+video via yt-dlp backend inside mpv
-        cmd.args(["--ytdl-format=bestvideo+bestaudio/best"]);
+        // merge audio+video via yt-dlp backend inside mpv; quality from config (v cycles)
+        cmd.arg(format!("--ytdl-format={}", quality_format(&cfg.quality)));
+        // IPC socket enables [ ] speed control while playing
+        cmd.arg(format!("--input-ipc-server={}", ipc_sock()));
         if cfg.mpv_pretty {
             // slim modern look without extra skins: borderless autofit + slim OSC.
             // For full uosc skin: `brew install uosc` / see mpv.conf docs.
@@ -128,6 +130,94 @@ fn single_file_url(youtube_url: &str) -> Result<String, String> {
         return Err("empty stream url".into());
     }
     Ok(stream)
+}
+
+
+/// mpv IPC socket for speed commands (std UnixStream, no extra deps).
+pub fn ipc_sock() -> String {
+    format!("{}/yt-tui-mpv.sock", std::env::var("TMPDIR").unwrap_or("/tmp".into()))
+}
+
+/// Map config quality -> mpv --ytdl-format.
+pub fn quality_format(q: &str) -> &'static str {
+    match q {
+        "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+        "audio" => "bestaudio/best",
+        _ => "bestvideo+bestaudio/best",
+    }
+}
+
+pub fn cycle_quality(cfg: &mut config::Config) -> String {
+    cfg.quality = match cfg.quality.as_str() {
+        "best" => "720p".into(),
+        "720p" => "480p".into(),
+        "480p" => "audio".into(),
+        _ => "best".into(),
+    };
+    config::save(cfg);
+    cfg.quality.clone()
+}
+
+pub fn ipc_send(json_cmd: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let mut s = UnixStream::connect(ipc_sock()).map_err(|_| "mpv not running".to_string())?;
+    s.write_all(json_cmd.as_bytes()).map_err(|e| e.to_string())?;
+    s.write_all(b"
+").map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+    let mut buf = vec![0u8; 4096];
+    let n = s.read(&mut buf).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+}
+
+pub fn ipc_speed(delta: f64) -> Result<String, String> {
+    let cmd = if delta > 0.0 { r#"{"command":["add","speed",0.25]}"# } else { r#"{"command":["add","speed",-0.25]}"# };
+    ipc_send(cmd)?;
+    let resp = ipc_send(r#"{"command":["get_property","speed"]}"#).unwrap_or_default();
+    Ok(format!("speed {}", resp.trim()))
+}
+
+/// Play a queue of ids natively in mpv (autoplay-next free via playlist).
+pub fn play_queue(ids: &[String], cfg: &config::Config) -> Result<String, String> {
+    if ids.is_empty() { return Err("queue empty — press a on videos to add".into()); }
+    if !has_mpv() { return Err("mpv not found".into()); }
+    let mut cmd = Command::new("mpv");
+    for id in ids.iter().take(25) {
+        cmd.arg(format!("https://www.youtube.com/watch?v={id}"));
+    }
+    cmd.arg(format!("--title=yt-tui queue ({} videos)", ids.len().min(25)));
+    cmd.arg(format!("--ytdl-format={}", quality_format(&cfg.quality)));
+    cmd.arg(format!("--input-ipc-server={}", ipc_sock()));
+    if cfg.mpv_pretty {
+        cmd.args(["--no-border", "--autofit-larger=90%x90%", "--msg-level=all=no"]);
+    }
+    cmd.args(&cfg.player_args);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.spawn().map_err(|e| format!("mpv spawn failed ({e})"))?;
+    Ok(format!("▶ queue: {} videos (mpv playlist, no ads)", ids.len().min(25)))
+}
+
+/// Download video (or audio-only) to download_dir in background.
+pub fn download(video_id: &str, audio_only: bool, cfg: &config::Config) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let dir = config::download_dir(cfg);
+    let _ = std::fs::create_dir_all(&dir);
+    let dir_s = dir.to_string_lossy().to_string();
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("yt-dlp");
+        if audio_only { cmd.args(["-x", "--audio-format", "mp3"]); }
+        else { cmd.args(["-f", "best"]); }
+        cmd.args(["--no-playlist", "--no-warnings", "-o", &format!("{dir_s}/%(title)s.%(ext)s"), &url]);
+        match cmd.output() {
+            Ok(o) if o.status.success() => { let _ = tx.send(Ok(format!("saved to {dir_s}"))); }
+            Ok(o) => { let _ = tx.send(Err(format!("dl failed: {}", String::from_utf8_lossy(&o.stderr).trim()))); }
+            Err(e) => { let _ = tx.send(Err(format!("yt-dlp: {e}"))); }
+        }
+    });
+    rx
 }
 
 pub fn open_browser(url: &str) {

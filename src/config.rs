@@ -50,6 +50,13 @@ pub struct Config {
     pub feed_total: usize,
     #[serde(default = "default_search_limit")]
     pub search_limit: usize,
+    /// mpv stream quality (`v` cycles): best, 720p, 480p, audio.
+    /// Maps to --ytdl-format. Single-file downloads always use best.
+    #[serde(default = "default_quality")]
+    pub quality: String,
+    /// Where `d`/`D` save. Default ~/Downloads/yt-tui.
+    #[serde(default)]
+    pub download_dir: String,
 }
 
 fn default_player() -> String {
@@ -69,6 +76,9 @@ fn default_feed_total() -> usize {
 }
 fn default_search_limit() -> usize {
     24
+}
+fn default_quality() -> String {
+    "best".into()
 }
 fn default_true() -> bool {
     true
@@ -94,6 +104,8 @@ impl Default for Config {
             feed_per_channel: default_feed_per_channel(),
             feed_total: default_feed_total(),
             search_limit: default_search_limit(),
+            quality: default_quality(),
+            download_dir: String::new(),
         }
     }
 }
@@ -178,6 +190,19 @@ fn zen_exists() -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+pub fn download_dir(cfg: &Config) -> std::path::PathBuf {
+    if !cfg.download_dir.is_empty() {
+        let s = cfg.download_dir.clone();
+        if let Some(rest) = s.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return std::path::PathBuf::from(format!("{home}/{rest}"));
+            }
+        }
+        return std::path::PathBuf::from(s);
+    }
+    dirs_home().join("Downloads").join("yt-tui")
 }
 
 pub fn save(cfg: &Config) {

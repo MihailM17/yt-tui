@@ -55,7 +55,7 @@ fn run(
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if (key.code == KeyCode::Char('q') && !app.searching)
+                    if (key.code == KeyCode::Char('q') && !app.searching && app.overlay.is_none())
                         || (key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                     {

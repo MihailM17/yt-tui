@@ -96,10 +96,73 @@ fn run_ytdlp(args: &[String]) -> Result<Vec<u8>, String> {
 }
 
 pub fn search(cfg: &config::Config, query: &str, limit: usize) -> Result<Vec<Video>, String> {
-    let target = format!("ytsearch{}:{query}", limit.min(20));
+    search_sorted(cfg, query, limit, SortMode::Relevance)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Relevance,
+    Views,
+    Longest,
+    Shortest,
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Relevance => Self::Views,
+            Self::Views => Self::Longest,
+            Self::Longest => Self::Shortest,
+            Self::Shortest => Self::Relevance,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Views => "most viewed",
+            Self::Longest => "longest",
+            Self::Shortest => "shortest",
+        }
+    }
+}
+
+/// Server-side date/views sort prefixes (ytsearchdate:) don't exist in this
+/// yt-dlp, so sort locally — zero extra network, instant.
+pub fn search_sorted(
+    cfg: &config::Config,
+    query: &str,
+    limit: usize,
+    sort: SortMode,
+) -> Result<Vec<Video>, String> {
+    let target = format!("ytsearch{}:{query}", limit.min(30));
     let mut args = base_args(cfg);
     args.push(target);
-    parse_flat(&run_ytdlp(&args)?)
+    let mut vids = parse_flat(&run_ytdlp(&args)?)?;
+    match sort {
+        SortMode::Relevance => {}
+        SortMode::Views => vids.sort_by_key(|v| std::cmp::Reverse(view_key(&v.views))),
+        SortMode::Longest => vids.sort_by_key(|v| std::cmp::Reverse(dur_key(&v.duration))),
+        SortMode::Shortest => vids.sort_by_key(|v| dur_key(&v.duration)),
+    }
+    Ok(vids)
+}
+
+fn view_key(s: &str) -> u64 {
+    // "1.2M views" -> 1200000; "" -> 0
+    let s = s.replace(" views", "").replace(" view", "");
+    if let Some(n) = s.strip_suffix('M') {
+        (n.parse::<f64>().unwrap_or(0.0) * 1_000_000.0) as u64
+    } else if let Some(n) = s.strip_suffix('K') {
+        (n.parse::<f64>().unwrap_or(0.0) * 1_000.0) as u64
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
+
+fn dur_key(s: &str) -> u64 {
+    // "m:ss" or "h:mm:ss" -> seconds
+    let parts: Vec<u64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
+    parts.iter().fold(0, |a, b| a * 60 + b)
 }
 
 /// Channel videos via `yt-dlp --flat-playlist -J <url>` (works for @handles).
@@ -292,4 +355,107 @@ pub fn fmt_age(ts: i64) -> String {
 
 pub fn _timeout() -> Duration {
     Duration::from_secs(25)
+}
+
+// ---------------------------------------------------------------------------
+// Info + comments (background threads; ~1MB info.json for comments, parsed+deleted)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct VideoInfo {
+    pub title: String,
+    pub channel: String,
+    pub views: String,
+    pub likes: String,
+    pub date: String,
+    pub duration: String,
+    pub desc: String,
+    pub chapters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Comment {
+    pub author: String,
+    pub text: String,
+    pub likes: String,
+}
+
+pub fn video_info(video_id: &str) -> Result<VideoInfo, String> {
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let out = std::process::Command::new("yt-dlp")
+        .args(["--dump-single-json", "--skip-download", "--no-warnings", &url])
+        .output()
+        .map_err(|e| format!("yt-dlp not found ({e})"))?;
+    if !out.status.success() {
+        return Err(format!("info failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse info: {e}"))?;
+    let strf = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mut chapters = vec![];
+    if let Some(ch) = v.get("chapters").and_then(|c| c.as_array()) {
+        for c in ch.iter().take(20) {
+            let t = c.get("start_time").and_then(|x| x.as_f64()).unwrap_or(0.0) as u64;
+            let title = c.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            chapters.push((format!("{}:{:02}", t / 60, t % 60), title));
+        }
+    }
+    let likes = v.get("like_count").and_then(|x| x.as_u64()).map(fmt_views).unwrap_or_default();
+    let views = v.get("view_count").and_then(|x| x.as_u64()).map(fmt_views).unwrap_or_default();
+    let date = v.get("upload_date").and_then(|x| x.as_str()).map(|d| {
+        if d.len() == 8 { format!("{}-{}-{}", &d[0..4], &d[4..6], &d[6..8]) } else { d.to_string() }
+    }).unwrap_or_default();
+    Ok(VideoInfo {
+        title: strf("title"), channel: strf("uploader"),
+        views, likes, date,
+        duration: v.get("duration").and_then(|x| x.as_f64()).map(fmt_dur).unwrap_or_default(),
+        desc: strf("description"), chapters,
+    })
+}
+
+pub fn video_comments(video_id: &str, max: usize) -> Result<Vec<Comment>, String> {
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let dir = config::cache_dir().join("comments");
+    let _ = std::fs::create_dir_all(&dir);
+    let tpl = format!("{}/c-%(id)s.%(ext)s", dir.to_string_lossy());
+    let out = std::process::Command::new("yt-dlp")
+        .args(["--skip-download", "--write-info-json", "--no-warnings",
+               "--max-downloads", "1", "-o", &tpl, &url])
+        .output()
+        .map_err(|e| format!("yt-dlp not found ({e})"))?;
+    if !out.status.success() {
+        return Err(format!("comments failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    // find newest info.json, parse top comments, delete
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.extension().map(|x| x == "json").unwrap_or(false) {
+                if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().map(|(_, t)| m > *t).unwrap_or(true) {
+                        newest = Some((path, m));
+                    }
+                }
+            }
+        }
+    }
+    let Some((path, _)) = newest else { return Err("no comments file".into()) };
+    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&path);
+    let v: serde_json::Value =
+        serde_json::from_slice(&data).map_err(|e| format!("parse comments: {e}"))?;
+    let mut out = vec![];
+    if let Some(arr) = v.get("comments").and_then(|c| c.as_array()) {
+        for c in arr.iter().take(max.max(5)) {
+            let author = c.get("author").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+            let mut text = c.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.len() > 220 { text.truncate(220); text.push('…'); }
+            let likes = c.get("like_count").and_then(|x| x.as_u64()).map(|n| if n > 1000 { format!("{}K", n/1000) } else { n.to_string() }).unwrap_or_default();
+            out.push(Comment { author, text, likes });
+        }
+    }
+    if out.is_empty() { return Err("comments disabled for this video".into()); }
+    Ok(out)
 }

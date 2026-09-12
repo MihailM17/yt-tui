@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, SidebarAction, View};
+use crate::app::{App, Overlay, SidebarAction, View};
 
 const BG: Color = Color::Rgb(10, 14, 22);
 const PANEL: Color = Color::Rgb(16, 22, 34);
@@ -84,6 +84,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     )]))
     .style(Style::default().bg(BG));
     f.render_widget(status, outer[3]);
+
+    if let Some(ov) = app.overlay.clone() {
+        render_overlay(f, app, area, &ov);
+    }
 
     if app.searching || app.adding_sub {
         use ratatui::layout::Position;
@@ -478,6 +482,90 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
         Line::from(vec![Span::raw("  "), Span::styled(meta, Style::default().fg(DIM))]),
     ];
     f.render_widget(Paragraph::new(info), info_area);
+}
+
+fn render_overlay(f: &mut Frame, app: &App, area: Rect, ov: &Overlay) {
+    let w = (area.width * 3 / 4).clamp(40, 110);
+    let h = (area.height * 3 / 4).clamp(12, 40);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect { x, y, width: w, height: h };
+    f.render_widget(ratatui::widgets::Clear, rect);
+    let (title, lines): (String, Vec<Line>) = match ov {
+        Overlay::Info { vid: _, info } => {
+            let mut l = vec![
+                Line::from(Span::styled(info.title.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(format!("{} • {} • {} • {} • ♥ {}", info.channel, info.views, info.date, info.duration, info.likes), Style::default().fg(ACCENT))),
+                Line::from(Span::raw("")),
+            ];
+            for para in info.desc.split("
+
+").take(30) {
+                let p: String = para.split_whitespace().collect::<Vec<_>>().join(" ");
+                if p.is_empty() { continue; }
+                l.push(Line::from(Span::styled(p, Style::default().fg(Color::White))));
+                l.push(Line::from(Span::raw("")));
+            }
+            if !info.chapters.is_empty() {
+                l.push(Line::from(Span::styled("Chapters:", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+                for (ts, name) in &info.chapters {
+                    l.push(Line::from(Span::styled(format!("  {ts}  {name}"), Style::default().fg(DIM))));
+                }
+            }
+            ("Info  (j/k scroll • Esc close)".into(), l)
+        }
+        Overlay::Comments { vid: _, items } => {
+            let mut l = vec![Line::from(Span::styled(format!("{} comments", items.len()), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))];
+            for c in items {
+                l.push(Line::from(vec![
+                    Span::styled(c.author.clone() + " ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled(if c.likes.is_empty() { String::new() } else { format!("♥{} ", c.likes) }, Style::default().fg(DIM)),
+                ]));
+                l.push(Line::from(Span::styled(c.text.clone(), Style::default().fg(Color::White))));
+                l.push(Line::from(Span::raw("")));
+            }
+            ("Comments  (j/k scroll • Esc close)".into(), l)
+        }
+        Overlay::Queue => {
+            let mut l = vec![];
+            if app.queue.is_empty() {
+                l.push(Line::from(Span::styled("Empty — hover a video in Home, press a to add", Style::default().fg(DIM))));
+            }
+            for (i, v) in app.queue.iter().enumerate() {
+                l.push(Line::from(Span::styled(format!("{}. {} — {}", i + 1, v.title, v.channel), Style::default().fg(Color::White))));
+            }
+            l.push(Line::from(Span::raw("")));
+            l.push(Line::from(Span::styled("Enter plays all in mpv (autoplay-next)", Style::default().fg(ACCENT))));
+            ("Queue  (Enter play • Esc close)".into(), l)
+        }
+        Overlay::Help => {
+            let rows = [
+                ("0/s/y", "home / subs / history"),
+                ("u", "test login (zen/chrome cookies)"),
+                ("w/t", "watch later / liked (needs login)"),
+                ("/", "live search"),
+                ("f", "cycle sort: relevance/views/longest/shortest"), ("n", "check subs for new uploads"),
+                ("i/c", "info+chapters / comments overlay"), ("a/Q/P", "queue add / view / play all"),
+                ("d/D", "download video / audio mp3"), ("v", "quality best→720p→480p→audio"),
+                ("[/]", "mpv speed -/+ (while playing)"), ("r/+", "refresh / load more"),
+                ("mouse", "click search, sidebar, videos; wheel scrolls"),
+            ];
+            // (label, desc) pairs rendered simply
+            let mut l = vec![];
+            for (k, d) in rows { l.push(Line::from(vec![Span::styled(format!("{k:8}"), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::styled(d, Style::default().fg(Color::White))])); }
+            let _ = &rows;
+            ("Help  (? or Esc close)".into(), l)
+        }
+    };
+    let scroll = app.overlay_scroll as u16;
+    let inner_h = h.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_h);
+    let s = (scroll as usize).min(max_scroll);
+    let visible: Vec<Line> = lines.into_iter().skip(s).take(inner_h).collect();
+    f.render_widget(
+        Paragraph::new(visible).block(Block::default().borders(Borders::ALL).title(title.as_str()).style(Style::default().bg(Color::Rgb(14, 19, 30)))),
+        rect,
+    );
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -25,8 +25,10 @@ Deps at runtime for playback (wired in `src/player.rs`):
 ## Keys
 
 - Mouse: click search/sidebar/videos, wheel scroll
-- `0` home • `s` subs • `y` history • `u` login test • `w` later • `t` liked (lowercase, no Shift; capitals still work)
-- `r` refresh feed (auto-loads on launch) • `+` load more (doubles limits) • sidebar rows clickable
+- `0/s/y` views • `u` login • `w/t` later/liked • `r` refresh (auto on launch) • `+` more
+- `i` info+chapters • `c` comments • `f` sort (relevance/views/longest/shortest)
+- `a/Q/P` queue add / view / play-all (autoplay) • `d/D` download video / mp3
+- `v` quality best→720p→480p→audio • `[/]` mpv speed • `n` new-upload check • `?` help
 - Subs view: `Enter` load channel • `a` add @handle • `d` remove • `r` refresh all
 - History view: `Enter` replay • `D` clear (local only)
 - Home: `hjkl`/arrows, `Enter`/`p` play, `o` browser, `/` live-search, `r` feed, `m` mock
@@ -86,7 +88,8 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 - [x] mockup UI (sidebar/chips/grid/ASCII thumbs)
 - [x] live search + subs feed via yt-dlp, real thumbs via curl+jpeg, disk cache 20MB
 - [x] `yt-dlp -g` + `mpv` playback (+browser fallback), history
-- [ ] SponsorBlock skip, quality picker via mpv IPC
+- [x] queue+autoplay, downloads, sort, new-check, quality/speed
+- [ ] SponsorBlock skip
 - [ ] Kitty/Sixel real-image thumbs as opt-in (`--gfx kitty|sixel|blocks`)
 
 ## Layout

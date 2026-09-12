@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use ratatui::{layout::Rect, text::Line};
 
 use crate::{config, data, player, thumb, youtube};
+use crate::youtube::{SortMode, VideoInfo, Comment};
 
 #[derive(Clone)]
 pub struct Video {
@@ -24,6 +25,14 @@ pub enum View {
     Home,
     Subs,
     History,
+}
+
+#[derive(Clone)]
+pub enum Overlay {
+    Info { vid: String, info: VideoInfo },
+    Comments { vid: String, items: Vec<Comment> },
+    Queue,
+    Help,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,6 +76,14 @@ pub struct App {
     pub card_hits: Vec<(Rect, usize)>,
     pub sidebar_hits: Vec<(Rect, SidebarAction)>,
     pub list_hits: Vec<(Rect, usize)>,
+    pub overlay: Option<Overlay>,
+    pub overlay_scroll: usize,
+    pub queue: Vec<Video>,
+    pub sort: SortMode,
+    rx_info: Option<std::sync::mpsc::Receiver<Result<(String, VideoInfo), String>>>,
+    rx_comments: Option<std::sync::mpsc::Receiver<Result<(String, Vec<Comment>), String>>>,
+    rx_dl: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    rx_new: Option<std::sync::mpsc::Receiver<Vec<String>>>,
 }
 
 impl App {
@@ -84,7 +101,7 @@ impl App {
         };
         let mpv_ok = player::has_mpv();
         let mut status = String::from(
-            "0 home • s subs • y hist • u login • w later • / search • r refresh • + more • q quit",
+            "0/s/y views • / search • i info • c comments • a queue • d dl • ? help • q quit",
         );
         if !mpv_ok {
             status.push_str(" • mpv missing");
@@ -121,6 +138,14 @@ impl App {
             card_hits: vec![],
             sidebar_hits: vec![],
             list_hits: vec![],
+            overlay: None,
+            overlay_scroll: 0,
+            queue: vec![],
+            sort: SortMode::Relevance,
+            rx_info: None,
+            rx_comments: None,
+            rx_dl: None,
+            rx_new: None,
         }
     }
 
@@ -208,6 +233,87 @@ impl App {
                 self.rx_auth = None;
             }
         }
+        if let Some(rx) = &self.rx_info {
+            match rx.try_recv() {
+                Ok(Ok((vid, info))) => {
+                    self.loading = false;
+                    self.overlay = Some(Overlay::Info { vid, info });
+                    self.overlay_scroll = 0;
+                    self.rx_info = None;
+                }
+                Ok(Err(e)) => {
+                    self.loading = false;
+                    self.status = format!("info failed: {e}");
+                    self.rx_info = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.loading = false;
+                    self.rx_info = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.rx_comments {
+            match rx.try_recv() {
+                Ok(Ok((vid, items))) => {
+                    self.loading = false;
+                    self.overlay = Some(Overlay::Comments { vid, items });
+                    self.overlay_scroll = 0;
+                    self.rx_comments = None;
+                }
+                Ok(Err(e)) => {
+                    self.loading = false;
+                    self.status = format!("comments: {e}");
+                    self.rx_comments = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.loading = false;
+                    self.rx_comments = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.rx_dl {
+            match rx.try_recv() {
+                Ok(Ok(msg)) => {
+                    self.status = format!("download done — {msg}");
+                    self.rx_dl = None;
+                }
+                Ok(Err(e)) => {
+                    self.status = e;
+                    self.rx_dl = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.rx_dl = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.rx_new {
+            match rx.try_recv() {
+                Ok(fresh) => {
+                    self.loading = false;
+                    for (name, dot) in self.subs.iter_mut() {
+                        *dot = fresh.contains(name);
+                    }
+                    self.status = if fresh.is_empty() {
+                        "no new uploads".into()
+                    } else {
+                        format!(
+                            "{} new: {} (S to browse)",
+                            fresh.len(),
+                            fresh.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+                        )
+                    };
+                    self.rx_new = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(_) => {
+                    self.loading = false;
+                    self.rx_new = None;
+                }
+            }
+        }
     }
 
     // ---------------- mouse ----------------
@@ -291,6 +397,23 @@ impl App {
     // ---------------- keyboard ----------------
 
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        // overlays eat keys first (scroll + close)
+        if self.overlay.is_some() {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => { self.overlay = None; self.overlay_scroll = 0; return; }
+                KeyCode::Char('j') | KeyCode::Down => { self.overlay_scroll += 1; return; }
+                KeyCode::Char('k') | KeyCode::Up => { self.overlay_scroll = self.overlay_scroll.saturating_sub(1); return; }
+                KeyCode::Enter => {
+                    // in queue overlay, Enter plays the queue
+                    if matches!(self.overlay, Some(Overlay::Queue)) {
+                        self.overlay = None;
+                        self.play_queue();
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
         // add-sub prompt takes priority
         if self.adding_sub {
             match code {
@@ -445,6 +568,22 @@ impl App {
                     self.status = format!("filter: {}", self.chips[i]);
                 }
             }
+            KeyCode::Char('i') if self.view == View::Home => self.open_info(),
+            KeyCode::Char('c') if self.view == View::Home => self.open_comments(),
+            KeyCode::Char('a') if self.view == View::Home => self.queue_add(),
+            KeyCode::Char('Q') => { self.overlay = Some(Overlay::Queue); self.overlay_scroll = 0; }
+            KeyCode::Char('P') if self.view == View::Home => self.play_queue(),
+            KeyCode::Char('d') if self.view == View::Home => self.start_download(false),
+            KeyCode::Char('D') if self.view == View::Home => self.start_download(true),
+            KeyCode::Char('f') if self.view == View::Home => self.cycle_sort(),
+            KeyCode::Char('n') => self.check_new(),
+            KeyCode::Char('v') => {
+                let q = player::cycle_quality(&mut self.cfg);
+                self.status = format!("quality for next play: {q}");
+            }
+            KeyCode::Char('[') => self.nudge_speed(-1.0),
+            KeyCode::Char(']') => self.nudge_speed(1.0),
+            KeyCode::Char('?') => { self.overlay = Some(Overlay::Help); self.overlay_scroll = 0; }
             KeyCode::Tab => {
                 self.active_chip = (self.active_chip + 1) % self.chips.len();
             }
@@ -516,10 +655,11 @@ impl App {
         self.loading = true;
         self.status = format!("searching \"{q}\" via yt-dlp…");
         let cfg = self.cfg.clone();
+        let sort = self.sort;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let res = youtube::search(&cfg, &q, cfg.search_limit);
+            let res = youtube::search_sorted(&cfg, &q, cfg.search_limit, sort);
             let _ = tx.send(res);
         });
     }
@@ -705,6 +845,127 @@ impl App {
             if self.live { self.live_search(q); return; }
         }
         self.load_feed();
+    }
+
+
+    // ---------------- easy-features ----------------
+
+    fn current_video(&self) -> Option<Video> {
+        if self.view != View::Home { return None; }
+        self.filtered.get(self.selected).and_then(|vi| self.videos.get(*vi)).cloned()
+    }
+
+    fn open_info(&mut self) {
+        let Some(v) = self.current_video() else { return; };
+        if v.id.starts_with("mock") { self.status = "mock entry — no info (live-search first)".into(); return; }
+        if self.loading { return; }
+        self.loading = true;
+        self.status = format!("info for {} …", short(&v.title));
+        let (tx, rx) = mpsc::channel();
+        self.rx_info = Some(rx);
+        std::thread::spawn(move || {
+            let id = v.id.clone();
+            let res = youtube::video_info(&id).map(|info| (id, info));
+            let _ = tx.send(res);
+        });
+    }
+
+    fn open_comments(&mut self) {
+        let Some(v) = self.current_video() else { return; };
+        if v.id.starts_with("mock") { self.status = "mock entry — no comments (live-search first)".into(); return; }
+        if self.loading { return; }
+        self.loading = true;
+        self.status = format!("comments for {} …", short(&v.title));
+        let (tx, rx) = mpsc::channel();
+        self.rx_comments = Some(rx);
+        std::thread::spawn(move || {
+            let id = v.id.clone();
+            let res = youtube::video_comments(&id, 30).map(|items| (id, items));
+            let _ = tx.send(res);
+        });
+    }
+
+    fn queue_add(&mut self) {
+        let Some(v) = self.current_video() else { return; };
+        if v.id.starts_with("mock") { self.status = "mock entry — cannot queue".into(); return; }
+        if self.queue.iter().any(|q| q.id == v.id) { self.status = "already in queue (Q to view)".into(); return; }
+        self.queue.push(v);
+        self.status = format!("queued ({} total) — Q view • P play", self.queue.len());
+    }
+
+    fn play_queue(&mut self) {
+        let ids: Vec<String> = self.queue.iter().map(|v| v.id.clone()).collect();
+        match player::play_queue(&ids, &self.cfg) {
+            Ok(msg) => self.status = msg,
+            Err(e) => self.status = format!("queue failed: {e}"),
+        }
+    }
+
+    fn start_download(&mut self, audio_only: bool) {
+        let Some(v) = self.current_video() else { return; };
+        if v.id.starts_with("mock") { self.status = "mock entry — cannot download".into(); return; }
+        if self.rx_dl.is_some() { self.status = "download already running…".into(); return; }
+        self.status = format!("downloading {} to {} …", if audio_only { "audio" } else { "video" }, config::download_dir(&self.cfg).to_string_lossy());
+        self.rx_dl = Some(player::download(&v.id, audio_only, &self.cfg));
+    }
+
+    fn cycle_sort(&mut self) {
+        self.sort = self.sort.next();
+        self.status = format!("sort: {} — re-running search…", self.sort.label());
+        if let Some(q) = self.last_query.clone() {
+            if self.loading { return; }
+            self.loading = true;
+            let cfg = self.cfg.clone();
+            let sort = self.sort;
+            let (tx, rx) = mpsc::channel();
+            self.rx = Some(rx);
+            std::thread::spawn(move || {
+                let res = youtube::search_sorted(&cfg, &q, cfg.search_limit, sort);
+                let _ = tx.send(res);
+            });
+        } else {
+            self.status = format!("sort: {} (applies to next search)", self.sort.label());
+        }
+    }
+
+    fn check_new(&mut self) {
+        if self.loading { return; }
+        let cfg = self.cfg.clone();
+        let subs = cfg.subscriptions.clone();
+        if subs.is_empty() { self.status = "no subs to check".into(); return; }
+        self.loading = true;
+        self.status = format!("checking {} subs for new uploads…", subs.len());
+        let (tx, rx) = mpsc::channel();
+        self.rx_new = Some(rx);
+        std::thread::spawn(move || {
+            let cache = config::cache_dir().join("last_seen.json");
+            let mut seen: std::collections::HashMap<String, String> =
+                std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+            let mut fresh: Vec<String> = vec![];
+            let mut latest_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for s in subs.iter() {
+                let url = if s.starts_with('@') { format!("https://www.youtube.com/{s}/videos") } else { s.clone() };
+                if let Ok(v) = youtube::channel_videos(&cfg, &url, 1) {
+                    if let Some(latest) = v.first() {
+                        latest_ids.insert(s.clone(), latest.id.clone());
+                        if seen.get(s).map(|id| id != &latest.id).unwrap_or(true) {
+                            fresh.push(s.clone());
+                        }
+                    }
+                }
+            }
+            for (s, id) in latest_ids.iter() { seen.insert(s.clone(), id.clone()); }
+            let _ = std::fs::create_dir_all(config::cache_dir());
+            let _ = std::fs::write(&cache, serde_json::to_string_pretty(&seen).unwrap_or_default());
+            let _ = tx.send(fresh);
+        });
+    }
+
+    fn nudge_speed(&mut self, delta: f64) {
+        match player::ipc_speed(delta) {
+            Ok(msg) => self.status = msg,
+            Err(_) => self.status = "mpv not playing (speed needs active mpv)".into(),
+        }
     }
 
     fn play_selected(&mut self) {
