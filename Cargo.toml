@@ -1,6 +1,6 @@
 [package]
 name = "yt-tui"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 description = "Lightweight terminal YouTube client (ratatui + mpv + yt-dlp). Image/ASCII thumbs, no browser."
 license = "MIT"

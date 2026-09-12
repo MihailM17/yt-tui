@@ -124,7 +124,7 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
             "YouTube ",
             Style::default().fg(th.fg).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("@@th.bg@@", Style::default().fg(th.dim)),
+        Span::styled("BG", Style::default().fg(th.dim)),
     ])])
     .block(block("", &th));
     f.render_widget(logo, chunks[0]);

@@ -1,12 +1,3 @@
-pub mod app;
-pub mod config;
-pub mod data;
-pub mod engage;
-pub mod player;
-pub mod theme;
-pub mod thumb;
-pub mod ui;
-pub mod youtube;
 
 use std::io::{self, stdout};
 
@@ -18,10 +9,10 @@ use crossterm::{
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::App;
+use yt_tui::app::{App, Overlay};
 
 fn config_marker() -> std::path::PathBuf {
-    config::base_dir().join(".welcomed")
+    yt_tui::config::base_dir().join(".welcomed")
 }
 
 fn main() -> io::Result<()> {
@@ -62,8 +53,8 @@ fn run(
     // first run: explain keys once (marker file, Help overlay)
     let welcome = config_marker();
     if !welcome.exists() {
-        app.overlay = Some(app::Overlay::Help);
-        let _ = std::fs::create_dir_all(config::base_dir());
+        app.overlay = Some(Overlay::Help);
+        let _ = std::fs::create_dir_all(yt_tui::config::base_dir());
         let _ = std::fs::write(&welcome, b"1");
     }
     let mut tick: u64 = 0;
@@ -75,13 +66,13 @@ fn run(
             app.poll_resume();
             if let Some(deadline) = app.sleep_until {
                 if std::time::Instant::now() >= deadline {
-                    player::quit_mpv();
+                    yt_tui::player::quit_mpv();
                     app.sleep_until = None;
                     app.status = "sleep timer: player stopped".into();
                 }
             }
         }
-        terminal.draw(|f| ui::render(f, app))?;
+        terminal.draw(|f| yt_tui::ui::render(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
