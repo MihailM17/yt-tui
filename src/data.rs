@@ -41,6 +41,8 @@ fn v(
         duration: duration.to_string(),
         hue,
         seed,
+        channel_id: String::new(),
+        channel_url: String::new(),
     }
 }
 

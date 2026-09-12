@@ -4,12 +4,13 @@ use std::sync::mpsc::{self, Receiver};
 
 use ratatui::{layout::Rect, text::Line};
 
-use crate::{config, data, player, thumb, youtube};
+use crate::{config, data, engage, player, thumb, youtube};
 use crate::youtube::{SortMode, VideoInfo, Comment};
 use ratatui_image::{picker::{Picker, ProtocolType}, protocol::StatefulProtocol};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Video {    pub id: String,
+pub struct Video {
+    pub id: String,
     pub title: String,
     pub channel: String,
     pub verified: bool,
@@ -18,6 +19,10 @@ pub struct Video {    pub id: String,
     pub duration: String,
     pub hue: u8,
     pub seed: u64,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub channel_url: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,6 +37,7 @@ pub enum Overlay {
     Info { vid: String, info: VideoInfo },
     Comments { vid: String, items: Vec<Comment> },
     Queue,
+    Actions { idx: usize },
     Settings,
     Help,
 }
@@ -91,6 +97,7 @@ pub struct App {
     rx_comments: Option<std::sync::mpsc::Receiver<Result<(String, Vec<Comment>), String>>>,
     rx_dl: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     rx_new: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    rx_act: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     rx_import: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
     mpv: Option<std::process::Child>,
     last_play: Option<std::time::Instant>,
@@ -166,6 +173,7 @@ impl App {
             rx_dl: None,
             rx_new: None,
             rx_import: None,
+            rx_act: None,
             mpv: None,
             last_play: None,
             last_play_id: String::new(),
@@ -395,6 +403,14 @@ impl App {
                 Err(_) => { self.loading = false; self.rx_import = None; }
             }
         }
+        if let Some(rx) = &self.rx_act {
+            match rx.try_recv() {
+                Ok(Ok(msg)) => { self.status = msg; self.rx_act = None; }
+                Ok(Err(e)) => { self.status = e; self.rx_act = None; }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(_) => { self.rx_act = None; }
+            }
+        }
         if let Some(rx) = &self.rx_new {
             match rx.try_recv() {
                 Ok(fresh) => {
@@ -427,6 +443,16 @@ impl App {
     /// Mouse: click search to type, click video to select (again to play),
     /// click sidebar to switch views, wheel to scroll.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        // right-click a card = action menu (like, subscribe, save…)
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Right)) && self.view == View::Home {
+            for (rect, idx) in self.card_hits.clone() {
+                if inside(rect, ev.column, ev.row) {
+                    self.selected = idx;
+                    self.open_actions();
+                    return;
+                }
+            }
+        }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x, y) = (ev.column, ev.row);
@@ -460,6 +486,16 @@ impl App {
                         if inside(rect, x, y) {
                             self.settings_sel = idx;
                             self.settings_cycle(idx);
+                            return;
+                        }
+                    }
+                    return;
+                }
+                if matches!(self.overlay, Some(Overlay::Actions { .. })) {
+                    for (rect, idx) in self.settings_hits.clone() {
+                        if inside(rect, x, y) {
+                            self.settings_sel = idx;
+                            self.execute_action(idx);
                             return;
                         }
                     }
@@ -537,17 +573,21 @@ impl App {
         // overlays eat keys first
         if self.overlay.is_some() {
             let is_settings = matches!(self.overlay, Some(Overlay::Settings));
+            let is_actions = matches!(self.overlay, Some(Overlay::Actions { .. }));
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => { self.overlay = None; self.overlay_scroll = 0; return; }
                 KeyCode::Char('j') | KeyCode::Down => {
                     if is_settings {
                         let n = self.settings_rows().len();
                         self.settings_sel = (self.settings_sel + 1).min(n.saturating_sub(1));
+                    } else if is_actions {
+                        let n = self.action_rows().len();
+                        self.settings_sel = (self.settings_sel + 1).min(n.saturating_sub(1));
                     } else { self.overlay_scroll += 1; }
                     return;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if is_settings {
+                    if is_settings || is_actions {
                         self.settings_sel = self.settings_sel.saturating_sub(1);
                     } else { self.overlay_scroll = self.overlay_scroll.saturating_sub(1); }
                     return;
@@ -559,6 +599,9 @@ impl App {
                     } else if is_settings {
                         let i = self.settings_sel;
                         self.settings_cycle(i);
+                    } else if is_actions {
+                        let i = self.settings_sel;
+                        self.execute_action(i);
                     }
                     return;
                 }
@@ -721,6 +764,7 @@ impl App {
             }
             KeyCode::Char('i') if self.view == View::Home => self.open_info(),
             KeyCode::Char('c') if self.view == View::Home => self.open_comments(),
+            KeyCode::Char('x') if self.view == View::Home => self.open_actions(),
             KeyCode::Char('a') if self.view == View::Home => self.queue_add(),
             KeyCode::Char('Q') => { self.overlay = Some(Overlay::Queue); self.overlay_scroll = 0; }
             KeyCode::Char('P') if self.view == View::Home => self.play_queue(),
@@ -1350,6 +1394,134 @@ fn save_feed_cache(videos: &[Video]) {
         config::cache_dir().join("feed.json"),
         serde_json::to_string(&cached).unwrap_or_default(),
     );
+}
+
+impl App {
+    // ---------------- engagement (x menu / right-click) ----------------
+
+    pub fn open_actions(&mut self) {
+        if self.view != View::Home || self.filtered.get(self.selected).is_none() { return; }
+        self.overlay = Some(Overlay::Actions { idx: self.selected });
+        self.settings_sel = 0;
+        self.overlay_scroll = 0;
+    }
+
+    fn action_video(&self) -> Option<Video> {
+        match self.overlay {
+            Some(Overlay::Actions { idx }) => self.filtered.get(idx).and_then(|vi| self.videos.get(*vi)).cloned(),
+            _ => None,
+        }
+    }
+
+    /// (label, value) rows for the action menu.
+    pub fn action_rows(&self) -> Vec<(String, String)> {
+        let subbed = self.action_subbed();
+        vec![
+            ("▶ Play".into(), "Enter".into()),
+            ("♥ Like".into(), "account".into()),
+            ("♡ Remove rating".into(), "account".into()),
+            ("👎 Dislike".into(), "account".into()),
+            ("＋ Queue".into(), format!("{} queued", self.queue.len())),
+            ("◷ Save to Watch Later".into(), "account".into()),
+            ("⬇ Download video".into(), "file".into()),
+            ("🎵 Download audio".into(), "mp3".into()),
+            (if subbed { "－ Unsubscribe".into() } else { "＋ Subscribe".into() }, "account".into()),
+            ("ⓘ Info".into(), "→".into()),
+            ("💬 Comments".into(), "→".into()),
+        ]
+    }
+
+    fn action_subbed(&self) -> bool {
+        let Some(v) = self.action_video() else { return false };
+        self.cfg.subscriptions.iter().any(|s| {
+            let a = s.to_lowercase();
+            a == v.channel.to_lowercase()
+                || (!v.channel_id.is_empty() && a.contains(&v.channel_id.to_lowercase()))
+                || (!v.channel_url.is_empty() && a == v.channel_url.to_lowercase())
+        })
+    }
+
+    fn channel_ref(&self, v: &Video) -> Option<String> {
+        if !v.channel_id.is_empty() { return Some(v.channel_id.clone()); }
+        if !v.channel_url.is_empty() { return Some(v.channel_url.clone()); }
+        None
+    }
+
+    pub fn execute_action(&mut self, row: usize) {
+        let Some(v) = self.action_video() else { return; };
+        if v.id.starts_with("mock") && !matches!(row, 0) {
+            self.status = "mock entry — live-search first".into();
+            return;
+        }
+        match row {
+            0 => {
+                let (id, title) = (v.id.clone(), v.title.clone());
+                config::push_history(&self.cfg, &v.id, &v.title, &v.channel);
+                self.overlay = None;
+                self.launch(&id, &title, None);
+            }
+            1 => self.engage(|cfg, id| engage::like(cfg, &id), v.id.clone(), "♥"),
+            2 => self.engage(|cfg, id| engage::remove_rating(cfg, &id), v.id.clone(), "♡"),
+            3 => self.engage(|cfg, id| engage::dislike(cfg, &id), v.id.clone(), "👎"),
+            4 => {
+                if !self.queue.iter().any(|q| q.id == v.id) { self.queue.push(v); }
+                self.status = format!("queued ({} total) — Q view • P play", self.queue.len());
+            }
+            5 => self.engage(|cfg, id| engage::save_watch_later(cfg, &id), v.id.clone(), "◷"),
+            6 => { self.overlay = None; self.selected = self.filtered.iter().position(|vi| self.videos.get(*vi).map(|x| x.id == v.id).unwrap_or(false)).unwrap_or(self.selected); self.start_download(false); }
+            7 => { self.overlay = None; self.selected = self.filtered.iter().position(|vi| self.videos.get(*vi).map(|x| x.id == v.id).unwrap_or(false)).unwrap_or(self.selected); self.start_download(true); }
+            8 => self.toggle_subscribe(v),
+            9 => { let id = v.id.clone(); self.overlay = None; self.selected = self.filtered.iter().position(|vi| self.videos.get(*vi).map(|x| x.id == id).unwrap_or(false)).unwrap_or(self.selected); self.open_info(); }
+            10 => { let id = v.id.clone(); self.overlay = None; self.selected = self.filtered.iter().position(|vi| self.videos.get(*vi).map(|x| x.id == id).unwrap_or(false)).unwrap_or(self.selected); self.open_comments(); }
+            _ => {}
+        }
+    }
+
+    fn engage(&mut self, f: fn(&config::Config, &str) -> Result<String, String>, id: String, _icon: &str) {
+        self.status = "syncing with your account…".into();
+        let cfg = self.cfg.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx_act = Some(rx);
+        std::thread::spawn(move || { let _ = tx.send(f(&cfg, &id)); });
+    }
+
+    fn toggle_subscribe(&mut self, v: Video) {
+        let Some(chan_ref) = self.channel_ref(&v) else {
+            self.status = "no channel link on this video".into();
+            return;
+        };
+        let subbed = self.action_subbed();
+        let cfg = self.cfg.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx_act = Some(rx);
+        self.status = if subbed { "unsubscribing…".into() } else { "subscribing…".into() };
+        let chan_for_thread = chan_ref.clone();
+        std::thread::spawn(move || {
+            let res = if subbed {
+                engage::unsubscribe(&cfg, &chan_for_thread)
+            } else {
+                engage::subscribe(&cfg, &chan_for_thread)
+            };
+            let _ = tx.send(res);
+        });
+        // mirror locally right away (config is the subs source of truth)
+        if subbed {
+            let name = v.channel.clone();
+            let url = v.channel_url.clone();
+            let cid = v.channel_id.clone();
+            self.cfg.subscriptions.retain(|s| {
+                s.to_lowercase() != name.to_lowercase() && s != &url && s != &cid
+            });
+            self.subs.retain(|(s, _)| {
+                s.to_lowercase() != name.to_lowercase() && s != &url && s != &cid
+            });
+        } else if !self.cfg.subscriptions.iter().any(|s| s.to_lowercase() == chan_ref.to_lowercase()) {
+            self.cfg.subscriptions.push(chan_ref);
+            let last = self.cfg.subscriptions.last().cloned().unwrap();
+            self.subs.push((last, false));
+        }
+        config::save(&self.cfg);
+    }
 }
 
 fn short(s: &str) -> String {

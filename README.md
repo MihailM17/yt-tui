@@ -29,6 +29,7 @@ Deps at runtime for playback (wired in `src/player.rs`):
 - `⚙`/`,` Settings: player, quality, thumbs, browser, cookies, feeds — click/Enter, persists
 - `i` info+chapters • `c` comments • `f` sort (relevance/views/longest/shortest)
 - `a/Q/P` queue add / view / play-all (autoplay) • `d/D` download video / mp3
+- `x`/right-click action menu: ♥ like, remove rating, 👎 dislike, save to Watch Later, subscribe (needs cookies.txt)
 - `v` quality best→720p→480p→audio • `[/]` mpv speed • `n` new-upload check • `?` help
 - Subs view: `Enter` load channel • `a` add @handle • `d` remove • `r` refresh all
 - History view: `Enter` replay • `D` clear (local only)
@@ -91,6 +92,7 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 - [x] `yt-dlp -g` + `mpv` playback (+browser fallback), history
 - [x] queue+autoplay, downloads, sort, new-check, quality/speed
 - [x] settings menu, real image thumbs (kitty/sixel, blocks fallback), import subs from account
+- [x] engagement: like/dislike/remove-rating, subscribe/unsubscribe, save to Watch Later (Innertube, no new deps)
 - [ ] SponsorBlock skip
 - [ ] Kitty/Sixel real-image thumbs as opt-in (`--gfx kitty|sixel|blocks`)
 

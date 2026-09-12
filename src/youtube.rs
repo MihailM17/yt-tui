@@ -267,6 +267,10 @@ struct Entry {
     timestamp: Option<i64>,
     #[serde(default)]
     channel_is_verified: Option<bool>,
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    channel_url: Option<String>,
 }
 
 pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
@@ -308,6 +312,8 @@ pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
             title,
             channel,
             verified: e.channel_is_verified.unwrap_or(false),
+            channel_id: e.channel_id.unwrap_or_default(),
+            channel_url: e.channel_url.unwrap_or_default(),
             views: e.view_count.map(fmt_views).unwrap_or_default(),
             age: e.timestamp.map(fmt_age).unwrap_or_default(),
             duration: e.duration.map(fmt_dur).unwrap_or_default(),

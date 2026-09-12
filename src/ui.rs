@@ -579,6 +579,26 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
             l.push(Line::from(Span::styled("Enter/click changes • saved to config.json", Style::default().fg(DIM))));
             ("Settings  (click or j/k + Enter • Esc closes)".into(), l)
         }
+        Overlay::Actions { .. } => {
+            app.settings_hits.clear();
+            let mut l = vec![];
+            let rows = app.action_rows();
+            for (i, (label, value)) in rows.iter().enumerate() {
+                let sel = i == app.settings_sel;
+                let rr = Rect { x: rect.x + 2, y: rect.y + 2 + i as u16, width: rect.width.saturating_sub(4), height: 1 };
+                if rr.y < rect.y + rect.height.saturating_sub(2) {
+                    app.settings_hits.push((rr, i));
+                }
+                l.push(Line::from(vec![
+                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { Color::White } else { DIM })),
+                    Span::styled(format!("{label:<24}"), Style::default().fg(if sel { Color::White } else { DIM }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                    Span::styled(value.clone(), Style::default().fg(ACCENT)),
+                ]));
+            }
+            l.push(Line::from(Span::raw("")));
+            l.push(Line::from(Span::styled("Enter/click runs • account rows need cookies.txt", Style::default().fg(DIM))));
+            ("Actions  (x or right-click • Esc closes)".into(), l)
+        }
         Overlay::Queue => {
             let mut l = vec![];
             if app.queue.is_empty() {
@@ -599,6 +619,7 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
                 ("/", "live search"),
                 ("f", "cycle sort: relevance/views/longest/shortest"), ("n", "check subs for new uploads"),
                 ("i/c", "info+chapters / comments overlay"), ("a/Q/P", "queue add / view / play all"),
+                ("x/right", "action menu: like, subscribe, save"),
                 ("d/D", "download video / audio mp3"), ("v", "quality best→720p→480p→audio"),
                 ("[/]", "mpv speed -/+ (while playing)"), ("r/+", "refresh / load more"),
                 ("mouse", "click everything: search, sidebar, thumbs, settings"),
