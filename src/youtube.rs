@@ -178,6 +178,12 @@ pub fn auth_test(cfg: &config::Config) -> Result<String, String> {
 #[derive(Debug, Deserialize)]
 struct Flat {
     entries: Option<Vec<Entry>>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    uploader: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,14 +195,33 @@ struct Entry {
     #[serde(default)]
     uploader: Option<String>,
     #[serde(default)]
+    uploader_id: Option<String>,
+    #[serde(default)]
     duration: Option<f64>,
     #[serde(default)]
     view_count: Option<u64>,
+    #[serde(default)]
+    timestamp: Option<i64>,
+    #[serde(default)]
+    channel_is_verified: Option<bool>,
 }
 
 pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
     let flat: Flat =
         serde_json::from_slice(json).map_err(|e| format!("parse yt-dlp json: {e}"))?;
+    // channel feeds omit per-entry channel — fall back to playlist-level name
+    // e.g. title "ScrapMan - Videos" -> "ScrapMan"
+    let fallback = flat
+        .channel
+        .or(flat.uploader)
+        .or_else(|| {
+            flat.title.as_ref().and_then(|t| {
+                t.strip_suffix(" - Videos")
+                    .or_else(|| t.strip_suffix(" - Live"))
+                    .map(|s| s.to_string())
+            })
+        })
+        .unwrap_or_else(|| "YouTube".into());
     let mut out = vec![];
     for e in flat.entries.unwrap_or_default() {
         let (Some(id), Some(title)) = (e.id, e.title) else {
@@ -208,15 +233,20 @@ pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
         let seed: u64 = id.bytes().fold(0xcbf29ce484222325, |a, b| {
             a.wrapping_mul(0x100000001b3).wrapping_add(b as u64)
         });
+        let channel = e
+            .channel
+            .or(e.uploader)
+            .or(e.uploader_id)
+            .unwrap_or_else(|| fallback.clone());
         out.push(Video {
             hue: (seed % 256) as u8,
             seed,
             id,
             title,
-            channel: e.channel.or(e.uploader).unwrap_or_else(|| "YouTube".into()),
-            verified: false,
+            channel,
+            verified: e.channel_is_verified.unwrap_or(false),
             views: e.view_count.map(fmt_views).unwrap_or_default(),
-            age: String::new(),
+            age: e.timestamp.map(fmt_age).unwrap_or_default(),
             duration: e.duration.map(fmt_dur).unwrap_or_default(),
         });
     }
@@ -238,6 +268,26 @@ pub fn fmt_views(n: u64) -> String {
 pub fn fmt_dur(s: f64) -> String {
     let s = s as u64;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Relative age from unix timestamp. Flat playlists often omit it (None -> "").
+pub fn fmt_age(ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(ts);
+    let d = (now - ts).max(0);
+    if d < 3600 {
+        format!("{} min ago", (d / 60).max(1))
+    } else if d < 86400 {
+        format!("{} hours ago", d / 3600)
+    } else if d < 86400 * 30 {
+        format!("{} days ago", d / 86400)
+    } else if d < 86400 * 365 {
+        format!("{} months ago", d / (86400 * 30))
+    } else {
+        format!("{} years ago", d / (86400 * 365))
+    }
 }
 
 pub fn _timeout() -> Duration {

@@ -450,6 +450,12 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     }
 
     let check = if v.verified { " ✓" } else { "" };
+    let meta = match (v.views.is_empty(), v.age.is_empty()) {
+        (true, true) => "live / new".to_string(),
+        (false, true) => v.views.clone(),
+        (true, false) => v.age.clone(),
+        (false, false) => format!("{} • {}", v.views, v.age),
+    };
     let info = vec![
         Line::from(vec![
             Span::styled("◉ ", Style::default().fg(Color::Red)),
@@ -467,10 +473,7 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
             Span::raw("  "),
             Span::styled(format!("{}{}", v.channel, check), Style::default().fg(DIM)),
         ]),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{} • {}", v.views, v.age), Style::default().fg(DIM)),
-        ]),
+        Line::from(vec![Span::raw("  "), Span::styled(meta, Style::default().fg(DIM))]),
     ];
     f.render_widget(Paragraph::new(info), info_area);
 }

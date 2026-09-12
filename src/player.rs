@@ -28,28 +28,12 @@ pub fn play(video_id: &str) -> Result<String, String> {
 pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String> {
     let url = format!("https://www.youtube.com/watch?v={video_id}");
 
-    let out = Command::new("yt-dlp")
-        .args(["-g", "--no-playlist", "--no-warnings", &url])
-        .output()
-        .map_err(|e| format!("yt-dlp not found ({e})"))?;
-
-    if !out.status.success() {
-        return Err(format!(
-            "yt-dlp failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-
-    let stream = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if stream.is_empty() {
-        return Err("empty stream url".into());
-    }
-
+    // NOTE (audio fix): `yt-dlp -g` returns 2 URLs — video-only + audio-only —
+    // and we used to pass only the first to mpv, hence silent video.
+    // Now: mpv plays the YouTube URL directly via its ytdl backend, which
+    // merges bestvideo+bestaudio (audio works, no manual URL plumbing).
+    // vlc/iina/browser still need a direct single-file URL -> `-f best`
+    // (progressive mp4 with audio, <=720p) instead of split streams.
     let player = cfg.player.to_lowercase();
     match player.as_str() {
         "browser" => {
@@ -57,26 +41,35 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
             return Ok("opened in browser".into());
         }
         "iina" => {
-            // macOS native player, much prettier than stock mpv
-            let st = Command::new("open")
-                .args(["-a", "IINA", &stream])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            if st.map(|s| s.success()).unwrap_or(false) {
-                return Ok(format!("▶ playing {video_id} via IINA"));
+            match single_file_url(&url) {
+                Ok(stream) => {
+                    let st = Command::new("open")
+                        .args(["-a", "IINA", &stream])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    if st.map(|s| s.success()).unwrap_or(false) {
+                        return Ok(format!("▶ playing {video_id} via IINA (with audio)"));
+                    }
+                }
+                Err(e) => return Err(e),
             }
             // fall through to mpv if IINA missing
         }
         "vlc" => {
-            let st = Command::new("vlc")
-                .arg(&stream)
-                .args(&cfg.player_args)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            if st.is_ok() {
-                return Ok(format!("▶ playing {video_id} via vlc"));
+            match single_file_url(&url) {
+                Ok(stream) => {
+                    let st = Command::new("vlc")
+                        .arg(&stream)
+                        .args(&cfg.player_args)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                    if st.is_ok() {
+                        return Ok(format!("▶ playing {video_id} via vlc (with audio)"));
+                    }
+                }
+                Err(e) => return Err(e),
             }
             // fall through to mpv
         }
@@ -85,7 +78,9 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
 
     if has_mpv() {
         let mut cmd = Command::new("mpv");
-        cmd.arg(&stream).arg(format!("--title={video_id}"));
+        cmd.arg(&url).arg(format!("--title={video_id}"));
+        // merge audio+video via yt-dlp backend inside mpv
+        cmd.args(["--ytdl-format=bestvideo+bestaudio/best"]);
         if cfg.mpv_pretty {
             // slim modern look without extra skins: borderless autofit + slim OSC.
             // For full uosc skin: `brew install uosc` / see mpv.conf docs.
@@ -107,6 +102,32 @@ pub fn play_with(video_id: &str, cfg: &config::Config) -> Result<String, String>
     // graceful fallback on machines without mpv (like this Mac right now)
     open_browser(&url);
     Ok("mpv not found — opened in browser instead (brew install mpv)".into())
+}
+
+/// Single progressive file URL (video+audio in one stream, <=720p).
+/// Used for vlc/iina which can't merge split streams. mpv doesn't need this
+/// since it merges via --ytdl-format itself.
+fn single_file_url(youtube_url: &str) -> Result<String, String> {
+    let out = Command::new("yt-dlp")
+        .args(["-g", "-f", "best", "--no-playlist", "--no-warnings", youtube_url])
+        .output()
+        .map_err(|e| format!("yt-dlp not found ({e})"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "yt-dlp failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let stream = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if stream.is_empty() {
+        return Err("empty stream url".into());
+    }
+    Ok(stream)
 }
 
 pub fn open_browser(url: &str) {
