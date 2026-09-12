@@ -8,16 +8,39 @@ use crate::{app::Video, config};
 /// Lightweight fetch via installed `yt-dlp` (no API key, no TLS in our binary).
 /// Runs in background threads (see App) so UI never blocks.
 
+fn cookie_args(cfg: &config::Config, force: bool) -> Vec<String> {
+    // cookies.txt file wins: reliable when Chrome is open or macOS keychain blocks reads
+    if !cfg.cookies_file.is_empty() {
+        let p = shellexpand(&cfg.cookies_file);
+        if std::path::Path::new(&p).exists() {
+            return vec!["--cookies".to_string(), p];
+        }
+        // file set but missing -> fall through to browser with clear error later
+    }
+    if cfg.use_cookies || force {
+        if !cfg.browser.is_empty() {
+            return vec!["--cookies-from-browser".to_string(), cfg.browser.clone()];
+        }
+    }
+    vec![]
+}
+
+fn shellexpand(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    s.to_string()
+}
+
 fn base_args(cfg: &config::Config) -> Vec<String> {
     let mut a = vec![
         "--flat-playlist".to_string(),
         "-J".to_string(),
         "--no-warnings".to_string(),
     ];
-    if cfg.use_cookies && !cfg.browser.is_empty() {
-        a.push("--cookies-from-browser".to_string());
-        a.push(cfg.browser.clone());
-    }
+    a.extend(cookie_args(cfg, false));
     a
 }
 
@@ -72,26 +95,46 @@ pub fn private_playlist(
 }
 
 /// Test cookie login: fetch 1 item from subs feed.
-/// Ok(handle) on success, Err(hint) on failure.
+/// Tries cookies.txt file first, then browser. Ok(msg) on success.
 pub fn auth_test(cfg: &config::Config) -> Result<String, String> {
-    let mut args = base_args(cfg);
-    // force cookies even if use_cookies=false, to test before enabling
-    if !cfg.use_cookies {
+    let mut args = vec![
+        "--flat-playlist".to_string(),
+        "-J".to_string(),
+        "--no-warnings".to_string(),
+    ];
+    let src: String;
+    if !cfg.cookies_file.is_empty() {
+        let p = shellexpand(&cfg.cookies_file);
+        if !std::path::Path::new(&p).exists() {
+            return Err(format!(
+                "cookies_file not found: {p} — export it first (see README login)"
+            ));
+        }
+        args.push("--cookies".to_string());
+        args.push(p.clone());
+        src = format!("cookies file {p}");
+    } else {
+        // force browser cookies for the test even if use_cookies=false
         args.push("--cookies-from-browser".to_string());
         args.push(cfg.browser.clone());
+        src = format!("{} cookies", cfg.browser);
     }
     args.push("--playlist-end".to_string());
     args.push("1".to_string());
     args.push("https://www.youtube.com/feed/subscriptions".to_string());
     let raw = run_ytdlp(&args).map_err(|e| {
-        format!("{e} — is YouTube open+logged in under browser=\"{}\" in config.json?", cfg.browser)
+        if cfg.cookies_file.is_empty() {
+            format!(
+                "{e} — Chrome locks cookies while open + macOS keychain often blocks reads. Fix: quit {b}, press L again, or use the reliable path: export cookies.txt (README login) and set cookies_file. Tried: {b} cookies",
+                b = cfg.browser
+            )
+        } else {
+            format!("{e} — cookies may be expired, re-export cookies.txt from youtube.com")
+        }
     })?;
-    let vids = parse_flat(&raw)?;
+    let _vids = parse_flat(&raw)?;
     Ok(format!(
-        "login OK via {} cookies ({} item{}) — set use_cookies=true to keep it",
-        cfg.browser,
-        vids.len().max(1),
-        if vids.len() == 1 { "" } else { "s" }
+        "login OK via {src} — set use_cookies=true (or keep cookies_file) to keep it"
     ))
 }
 

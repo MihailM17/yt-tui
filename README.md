@@ -31,15 +31,29 @@ Deps at runtime for playback (wired in `src/player.rs`):
 - Home: `hjkl`/arrows, `Enter`/`p` play, `o` browser, `/` live-search, `r` feed, `m` mock
 - `q` or `Ctrl-C` quit
 
-## Login (no password in TUI — by design)
+## Login (no Google password in TUI — Google blocks it)
 
-Google blocks password logins from terminals. Instead yt-tui borrows your
-normal browser's YouTube cookies (same trick `yt-dlp --cookies-from-browser` uses):
+There is no username/password login for terminals: Google requires OAuth +
+bot-checks/2FA, and `yt-dlp` removed password auth years ago. The supported
+path is cookies — the TUI never sees your password.
 
-1. Open YouTube in Chrome and log in normally
-2. In `~/.config/yt-tui/config.json` set `"browser": "chrome"` (or brave/edge/firefox), `"use_cookies": false` first
-3. In yt-tui press `L` — should say `login OK via chrome cookies`
-4. Set `"use_cookies": true`, restart. `W`/`T` now load Watch Later / Liked, `r` includes private subs.
+**If `L` failed, it's almost always one of these (you're not dumb):**
+- Chrome was open → it locks the cookie DB, read fails
+- macOS keychain blocked the read (popup denied / no prompt)
+- Wrong `"browser"` name in config (you use Brave but config says chrome)
+
+**Reliable path (do this):**
+
+1. Install "Get cookies.txt LOCALLY" extension (Chrome/Firefox), open youtube.com logged in, Export → save as `~/.config/yt-tui/cookies.txt`
+2. In `~/.config/yt-tui/config.json` set `"cookies_file": "~/.config/yt-tui/cookies.txt"`
+3. In yt-tui press `L` — should say `login OK via cookies file`
+4. Set `"use_cookies": true`, restart. `W`/`T` load Watch Later / Liked.
+
+**Quick path (flaky):** quit your browser completely, set `"browser": "chrome"` (or brave/firefox — whichever holds the login), press `L`.
+
+Real Google OAuth (Cloud project + API key + quota) is possible but heavy —
+10k units/day, verification, client secrets. Say the word and I'll add it as
+`yt-tui login --oauth`, but cookies cover Watch Later/Liked/subs today.
 
 History never needs login — it's local (`~/.local/share/yt-tui/history.json`).
 Subs are just `@handles` in config.json — `S` then `a` to add, no login needed for public channels.

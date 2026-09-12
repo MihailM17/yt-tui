@@ -29,6 +29,12 @@ pub struct Config {
     /// Turn on after `L` login test succeeds.
     #[serde(default)]
     pub use_cookies: bool,
+    /// More reliable than browser reading (which fails when Chrome is open
+    /// or macOS keychain blocks it): export via "Get cookies.txt LOCALLY"
+    /// extension while on youtube.com, save to e.g. ~/.config/yt-tui/cookies.txt,
+    /// set this path here. Takes priority over `browser` when set.
+    #[serde(default)]
+    pub cookies_file: String,
 }
 
 fn default_player() -> String {
@@ -56,6 +62,7 @@ impl Default for Config {
             mpv_pretty: true,
             browser: default_browser(),
             use_cookies: false,
+            cookies_file: String::new(),
         }
     }
 }
