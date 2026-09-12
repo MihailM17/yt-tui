@@ -3,6 +3,7 @@
 No browser. No ads. A single **1.2MB** binary idling at **~15MB RAM** (browser YouTube: 500MB+).
 
 ![Home feed](docs/home-midnight.png)
+*Home feed (Midnight theme) — click any thumbnail, mouse or keyboard.*
 
 ## Why
 
@@ -12,6 +13,7 @@ No browser. No ads. A single **1.2MB** binary idling at **~15MB RAM** (browser Y
 - **Pretty** — real image thumbnails on Kitty/Ghostty/WezTerm (ASCII-art fallback everywhere), **11 Omarchy themes** in Settings → Style:
 
 ![Tokyo Night theme](docs/home-tokyonight.png)
+*Same feed, Tokyo Night — 11 Omarchy themes in Settings → Style.*
 
 ## Install
 
@@ -27,10 +29,12 @@ cargo install --path .   # then run `yt-tui` from anywhere
 `yt-tui` — Home loads on launch. `/` searches, `Enter` plays in mpv (ad-free), `q` quits. Press `?` in-app for all keys.
 
 ![Settings](docs/settings.png)
+*Everything is configurable without touching JSON — click or Enter a row.*
 
 **Login (for likes, subscriptions, Watch Later):** Google blocks terminal passwords, so export `cookies.txt` ( extension while on youtube.com) → Settings → Cookies file → Test login. History, search, and public feeds need no login.
 
 ![Action menu: like, subscribe, save](docs/actions.png)
+*Right-click (or `x`) any video: like, subscribe, save to Watch Later, download.*
 
 Right-click (or `x`) any video for like / subscribe / save / download.
 

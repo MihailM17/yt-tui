@@ -41,7 +41,7 @@ fn main() {
             }
             _ => {}
         }
-        let backend = TestBackend::new(190, 44);
+        let backend = TestBackend::new(140, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| yt_tui::ui::render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer().clone();
