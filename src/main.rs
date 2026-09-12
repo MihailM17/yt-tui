@@ -26,6 +26,8 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
+    // behave like the app: auto-refresh subs feed on launch (background)
+    app.load_feed();
     let res = run(&mut terminal, &mut app);
 
     disable_raw_mode()?;

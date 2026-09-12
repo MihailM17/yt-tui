@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, View};
+use crate::app::{App, SidebarAction, View};
 
 const BG: Color = Color::Rgb(10, 14, 22);
 const PANEL: Color = Color::Rgb(16, 22, 34);
@@ -199,18 +199,18 @@ fn render_view_bar(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_hits.clear();
-    // rows: Home / Subs / History are clickable; rest is info
-    let rows: Vec<(&str, Option<View>)> = vec![
-        ("⌂ Home  (0)", Some(View::Home)),
+    // every row below is clickable now (Later/Liked/Login are actions, not views)
+    let rows: Vec<(&str, Option<SidebarAction>)> = vec![
+        ("⌂ Home  (0)", Some(SidebarAction::Go(View::Home))),
         ("", None),
         ("Subscriptions  ›", None),
-        ("◦ Subs  (s)", Some(View::Subs)),
+        ("◦ Subs  (s)", Some(SidebarAction::Go(View::Subs))),
         ("", None),
         ("You  ›", None),
-        ("↻ History  (y)", Some(View::History)),
-        ("◷ Later  (w)", None),
-        ("♡ Liked  (t)", None),
-        ("🔑 Login  (u)", None),
+        ("↻ History  (y)", Some(SidebarAction::Go(View::History))),
+        ("◷ Later  (w)", Some(SidebarAction::Later)),
+        ("♡ Liked  (t)", Some(SidebarAction::Liked)),
+        ("🔑 Login  (u)", Some(SidebarAction::Login)),
     ];
     let mut lines: Vec<Line> = vec![];
     let mut y = area.y;
@@ -223,9 +223,11 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             y += 1;
             continue;
         }
-        let active = view.map(|v| v == app.view).unwrap_or(false);
+        let active = view
+            .map(|a| matches!(a, SidebarAction::Go(v) if v == app.view))
+            .unwrap_or(false);
         lines.push(menu_line(label, active));
-        if let Some(v) = view {
+        if let Some(a) = view {
             app.sidebar_hits.push((
                 Rect {
                     x: area.x,
@@ -233,7 +235,7 @@ fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     width: area.width,
                     height: 1,
                 },
-                *v,
+                *a,
             ));
         }
         y += 1;

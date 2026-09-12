@@ -128,12 +128,56 @@ pub fn load() -> Config {
     let p = base_dir().join("config.json");
     if let Ok(bytes) = fs::read(&p) {
         if let Ok(c) = serde_json::from_slice::<Config>(&bytes) {
+            let mut c = c;
+            // migrate old configs (first-run file lacks new keys): fill + autosave
+            let raw = String::from_utf8_lossy(&bytes);
+            let mut dirty = false;
+            // auto-pick zen when its profile exists and config still says default chrome
+            if c.browser == "chrome" && !raw.contains("\"browser\"") && zen_exists() {
+                c.browser = "zen".into();
+                dirty = true;
+            }
+            for key in [
+                "\"player\"",
+                "\"browser\"",
+                "\"thumb_quality\"",
+                "\"feed_per_channel\"",
+                "\"cookies_file\"",
+            ] {
+                if !raw.contains(key) {
+                    dirty = true;
+                    break;
+                }
+            }
+            if dirty {
+                save(&c);
+            }
             return c;
         }
     }
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    // fresh install on a Zen machine -> default to zen straight away
+    if zen_exists() {
+        cfg.browser = "zen".into();
+    }
     save(&cfg);
     cfg
+}
+
+fn zen_exists() -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let base =
+        std::path::PathBuf::from(home).join("Library/Application Support/zen/Profiles");
+    std::fs::read_dir(&base)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok()).any(|e| {
+                e.path().join("cookies.sqlite").exists()
+                    || e.file_name().to_string_lossy().contains("Default")
+            })
+        })
+        .unwrap_or(false)
 }
 
 pub fn save(cfg: &Config) {

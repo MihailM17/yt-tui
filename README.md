@@ -25,7 +25,8 @@ Deps at runtime for playback (wired in `src/player.rs`):
 ## Keys
 
 - Mouse: click search/sidebar/videos, wheel scroll
-- `0` home • `s` subs • `y` history • `u` login test • `w` watch later • `t` liked (lowercase, no Shift; capitals still work)
+- `0` home • `s` subs • `y` history • `u` login test • `w` later • `t` liked (lowercase, no Shift; capitals still work)
+- `r` refresh feed (auto-loads on launch) • `+` load more (doubles limits) • sidebar rows clickable
 - Subs view: `Enter` load channel • `a` add @handle • `d` remove • `r` refresh all
 - History view: `Enter` replay • `D` clear (local only)
 - Home: `hjkl`/arrows, `Enter`/`p` play, `o` browser, `/` live-search, `r` feed, `m` mock

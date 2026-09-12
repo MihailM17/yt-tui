@@ -26,6 +26,14 @@ pub enum View {
     History,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidebarAction {
+    Go(View),
+    Later,
+    Liked,
+    Login,
+}
+
 pub struct App {
     pub view: View,
     pub videos: Vec<Video>,
@@ -42,6 +50,7 @@ pub struct App {
     pub query: String,
     pub searching: bool,
     pub adding_sub: bool,
+    pub last_query: Option<String>,
     pub status: String,
     pub should_quit: bool,
     pub loading: bool,
@@ -56,7 +65,7 @@ pub struct App {
     pub search_rect: Rect,
     pub chips_rect: Rect,
     pub card_hits: Vec<(Rect, usize)>,
-    pub sidebar_hits: Vec<(Rect, View)>,
+    pub sidebar_hits: Vec<(Rect, SidebarAction)>,
     pub list_hits: Vec<(Rect, usize)>,
 }
 
@@ -75,7 +84,7 @@ impl App {
         };
         let mpv_ok = player::has_mpv();
         let mut status = String::from(
-            "0 home • s subs • y hist • u login • / search • click works • q quit",
+            "0 home • s subs • y hist • u login • w later • / search • r refresh • + more • q quit",
         );
         if !mpv_ok {
             status.push_str(" • mpv missing");
@@ -96,6 +105,7 @@ impl App {
             query: String::new(),
             searching: false,
             adding_sub: false,
+            last_query: None,
             status,
             should_quit: false,
             loading: false,
@@ -213,9 +223,14 @@ impl App {
                     self.adding_sub = false;
                     return;
                 }
-                for (rect, v) in self.sidebar_hits.clone() {
+                for (rect, a) in self.sidebar_hits.clone() {
                     if inside(rect, x, y) {
-                        self.set_view(v);
+                        match a {
+                            SidebarAction::Go(v) => self.set_view(v),
+                            SidebarAction::Later => self.load_private("later"),
+                            SidebarAction::Liked => self.load_private("liked"),
+                            SidebarAction::Login => self.test_login(),
+                        }
                         return;
                     }
                 }
@@ -342,6 +357,7 @@ impl App {
             KeyCode::Char('u') | KeyCode::Char('L') => self.test_login(),
             KeyCode::Char('w') | KeyCode::Char('W') => self.load_private("later"),
             KeyCode::Char('t') | KeyCode::Char('T') => self.load_private("liked"),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.load_more(),
             // search / feed
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -660,7 +676,7 @@ impl App {
         }
         if !self.cfg.use_cookies {
             self.status = format!(
-                "needs login: press L to test, then set use_cookies=true in config.json (browser={})",
+                "needs login: press u to test, then set use_cookies=true in config.json (browser={})",
                 self.cfg.browser
             );
             return;
@@ -678,6 +694,18 @@ impl App {
     }
 
     // ---------------- playback ----------------
+
+    /// App-like "load more": doubles limits and re-runs current job.
+    pub fn load_more(&mut self) {
+        if self.loading { return; }
+        self.cfg.feed_total = (self.cfg.feed_total + 20).min(120);
+        self.cfg.search_limit = (self.cfg.search_limit + 12).min(60);
+        config::save(&self.cfg);
+        if let Some(q) = self.last_query.clone() {
+            if self.live { self.live_search(q); return; }
+        }
+        self.load_feed();
+    }
 
     fn play_selected(&mut self) {
         let Some(&vi) = self.filtered.get(self.selected) else {
