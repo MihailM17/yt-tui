@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::App;
+use crate::app::{App, View};
 
 const BG: Color = Color::Rgb(10, 14, 22);
 const PANEL: Color = Color::Rgb(16, 22, 34);
@@ -18,10 +18,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
     f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-    // remember cols for vim nav (set again in render_grid)
     app.cols = if area.width >= 178 { 3 } else if area.width >= 128 { 2 } else { 1 };
 
-    // outer: header / chips / main / status
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -33,9 +31,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(area);
 
     render_header(f, app, outer[0]);
-    render_chips(f, app, outer[1]);
+    if app.view == View::Home {
+        render_chips(f, app, outer[1]);
+    } else {
+        render_view_bar(f, app, outer[1]);
+    }
 
-    // main: sidebar + grid
     let side_w = if area.width < 90 { 0 } else { 28 };
     let main_chunks = if side_w == 0 {
         vec![outer[2]]
@@ -48,17 +49,34 @@ pub fn render(f: &mut Frame, app: &mut App) {
     };
     if side_w > 0 {
         render_sidebar(f, app, main_chunks[0]);
-        render_grid(f, app, main_chunks[1]);
+        match app.view {
+            View::Home => render_grid(f, app, main_chunks[1]),
+            View::Subs => render_subs(f, app, main_chunks[1]),
+            View::History => render_history(f, app, main_chunks[1]),
+        }
     } else {
-        render_grid(f, app, main_chunks[0]);
+        match app.view {
+            View::Home => render_grid(f, app, main_chunks[0]),
+            View::Subs => render_subs(f, app, main_chunks[0]),
+            View::History => render_history(f, app, main_chunks[0]),
+        }
     }
 
     let status_txt = if app.loading {
         " ⟳ loading via yt-dlp… (UI stays responsive)".to_string()
-    } else if app.live {
-        format!(" ●LIVE  {}", past_status(app))
     } else {
-        format!(" ○MOCK  {}", past_status(app))
+        let badge = match app.view {
+            View::Home if app.live => "●LIVE",
+            View::Home => "○MOCK",
+            View::Subs => "◦SUBS",
+            View::History => "◦HIST",
+        };
+        let login = match app.login_ok {
+            Some(true) => " 🔓",
+            Some(false) => " 🔒login-failed(L)",
+            None => "",
+        };
+        format!(" {badge}{login}  {}", past_status(app))
     };
     let status = Paragraph::new(Line::from(vec![Span::styled(
         format!(" {status_txt}"),
@@ -67,7 +85,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     .style(Style::default().bg(BG));
     f.render_widget(status, outer[3]);
 
-    if app.searching {
+    if app.searching || app.adding_sub {
         use ratatui::layout::Position;
         f.set_cursor_position(Position::new(
             outer[0].x + 22 + app.query.len() as u16 + 1,
@@ -91,32 +109,32 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
     app.search_rect = chunks[1];
 
-    let logo = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("☰ ", Style::default().fg(DIM)),
-            Span::styled("▶ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                "YouTube ",
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("BG", Style::default().fg(DIM)),
-        ]),
-    ])
+    let logo = Paragraph::new(vec![Line::from(vec![
+        Span::styled("☰ ", Style::default().fg(DIM)),
+        Span::styled("▶ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "YouTube ",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("BG", Style::default().fg(DIM)),
+    ])])
     .block(block(""));
     f.render_widget(logo, chunks[0]);
 
-    let search_txt = if app.searching {
-        format!("{}▌", app.query)
+    let (prompt, txt) = if app.adding_sub {
+        ("+sub: ", app.query.clone() + "▌")
+    } else if app.searching {
+        ("", format!("{}▌", app.query))
     } else if app.query.is_empty() {
-        "Search...".to_string()
+        ("", "Search... (/ • click)".to_string())
     } else {
-        app.query.clone()
+        ("", app.query.clone())
     };
     let search = Paragraph::new(Line::from(vec![
-        Span::styled(" ", Style::default()),
+        Span::styled(prompt, Style::default().fg(ACCENT)),
         Span::styled(
-            search_txt,
-            Style::default().fg(if app.query.is_empty() && !app.searching {
+            txt,
+            Style::default().fg(if app.query.is_empty() && !app.searching && !app.adding_sub {
                 DIM
             } else {
                 Color::White
@@ -126,7 +144,13 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(if app.searching { ACCENT } else { DIM }))
+            .border_style(Style::default().fg(
+                if app.searching || app.adding_sub {
+                    ACCENT
+                } else {
+                    DIM
+                },
+            ))
             .style(Style::default().bg(PANEL)),
     );
     f.render_widget(search, chunks[1]);
@@ -160,18 +184,66 @@ fn render_chips(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(p, area);
 }
 
-fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
+fn render_view_bar(f: &mut Frame, app: &mut App, area: Rect) {
+    app.chips_rect = Rect::default();
+    let title = match app.view {
+        View::Subs => "Subscriptions — Enter load • a add • d remove • r refresh all",
+        View::History => "History (local, no login) — Enter replay • D clear",
+        _ => "",
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(title, Style::default().fg(DIM)))).block(block("")),
+        area,
+    );
+}
+
+fn render_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
+    app.sidebar_hits.clear();
+    // rows: Home / Subs / History are clickable; rest is info
+    let rows: Vec<(&str, Option<View>)> = vec![
+        ("⌂ Home  (0)", Some(View::Home)),
+        ("", None),
+        ("Subscriptions  ›", None),
+        ("◦ Manage  (S)", Some(View::Subs)),
+        ("", None),
+        ("You  ›", None),
+        ("↻ History  (H)", Some(View::History)),
+        ("◷ Watch later  (W)", None),
+        ("♡ Liked  (T)", None),
+        ("🔑 Login test  (L)", None),
+    ];
     let mut lines: Vec<Line> = vec![];
-    lines.push(menu_line("⌂ Home", true));
+    let mut y = area.y;
+    for (label, view) in &rows {
+        if label.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "────────────────────",
+                Style::default().fg(DIM),
+            )));
+            y += 1;
+            continue;
+        }
+        let active = view.map(|v| v == app.view).unwrap_or(false);
+        lines.push(menu_line(label, active));
+        if let Some(v) = view {
+            app.sidebar_hits.push((
+                Rect {
+                    x: area.x,
+                    y,
+                    width: area.width,
+                    height: 1,
+                },
+                *v,
+            ));
+        }
+        y += 1;
+    }
+    // channel list preview (first 7)
     lines.push(Line::from(Span::styled(
         "────────────────────",
         Style::default().fg(DIM),
     )));
-    lines.push(Line::from(Span::styled(
-        "Subscriptions  ›",
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    )));
-    for (name, fresh) in &app.subs {
+    for (name, fresh) in app.subs.iter().take(7) {
         let dot = if *fresh { " •" } else { "" };
         lines.push(Line::from(vec![
             Span::styled("◉ ", Style::default().fg(Color::Red)),
@@ -179,27 +251,6 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(dot, Style::default().fg(ACCENT)),
         ]));
     }
-    lines.push(Line::from(Span::styled("﹀ Show more", Style::default().fg(DIM))));
-    lines.push(Line::from(Span::styled(
-        "────────────────────",
-        Style::default().fg(DIM),
-    )));
-    lines.push(Line::from(Span::styled(
-        "You  ›",
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    )));
-    for item in [
-        "◉ Your channel",
-        "↻ History",
-        "☰ Playlists",
-        "◷ Watch later",
-        "♡ Liked videos",
-        "▷ Your videos",
-        "⬇ Downloads",
-    ] {
-        lines.push(Line::from(Span::styled(item, Style::default().fg(DIM))));
-    }
-    lines.push(Line::from(Span::styled("﹀ Show more", Style::default().fg(DIM))));
 
     let p = Paragraph::new(lines).block(
         Block::default()
@@ -230,6 +281,7 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
     };
     app.cols = cols;
     app.card_hits.clear();
+    app.list_hits.clear();
     let rows: usize = 3;
     let row_h = area.height / rows.max(1) as u16;
 
@@ -259,6 +311,106 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+fn render_subs(f: &mut Frame, app: &mut App, area: Rect) {
+    app.card_hits.clear();
+    app.list_hits.clear();
+    let mut lines: Vec<Line> = vec![];
+    if app.subs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No subscriptions — press a to add @handle",
+            Style::default().fg(DIM),
+        )));
+    }
+    for (i, (name, _)) in app.subs.iter().enumerate() {
+        let sel = i == app.sub_selected;
+        let row_rect = Rect {
+            x: area.x + 1,
+            y: area.y + 1 + i as u16,
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        if row_rect.y < area.y + area.height {
+            app.list_hits.push((row_rect, i));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{} {name}", if sel { "▶" } else { " ◉" }),
+            Style::default()
+                .fg(if sel { Color::White } else { DIM })
+                .bg(if sel {
+                    Color::Rgb(30, 50, 85)
+                } else {
+                    BG
+                })
+                .add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
+        )));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled(
+        "Enter load channel • a add • d remove • r refresh all feed",
+        Style::default().fg(DIM),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Subscriptions")
+                .style(Style::default().bg(BG)),
+        ),
+        area,
+    );
+}
+
+fn render_history(f: &mut Frame, app: &mut App, area: Rect) {
+    app.card_hits.clear();
+    app.list_hits.clear();
+    let mut lines: Vec<Line> = vec![];
+    if app.hist.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Empty — play a video from Home and it lands here (local only)",
+            Style::default().fg(DIM),
+        )));
+    }
+    for (i, e) in app.hist.iter().enumerate().take(area.height as usize - 3) {
+        let sel = i == app.hist_selected;
+        let row_rect = Rect {
+            x: area.x + 1,
+            y: area.y + 1 + i as u16,
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        app.list_hits.push((row_rect, i));
+        let ch = if e.channel.is_empty() {
+            "".to_string()
+        } else {
+            format!(" — {}", e.channel)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{} {}{}", if sel { "▶" } else { " " }, truncate(&e.title, 70), ch),
+            Style::default()
+                .fg(if sel { Color::White } else { DIM })
+                .bg(if sel {
+                    Color::Rgb(30, 50, 85)
+                } else {
+                    BG
+                }),
+        )));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled(
+        "Enter replay • D clear history",
+        Style::default().fg(DIM),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("History")
+                .style(Style::default().bg(BG)),
+        ),
+        area,
+    );
+}
+
 fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selected: bool) {
     if area.height < 10 || area.width < 20 {
         return;
@@ -271,7 +423,6 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
-    // thumb takes top ~60%, info bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(4)])
@@ -280,13 +431,9 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     let info_area = chunks[1];
 
     let v = app.videos[video_idx].clone();
-    let thumb_h = thumb_area.height;
-    let thumb_w = thumb_area.width;
-    let lines = app.thumb(video_idx, thumb_w, thumb_h.saturating_sub(1));
-    let thumb_para = Paragraph::new(lines);
-    f.render_widget(thumb_para, thumb_area);
+    let lines = app.thumb(video_idx, thumb_area.width, thumb_area.height.saturating_sub(1));
+    f.render_widget(Paragraph::new(lines), thumb_area);
 
-    // duration overlay bottom-right of thumb
     let dur = format!(" {} ", v.duration);
     let dw = dur.len() as u16;
     if thumb_area.width > dw + 2 && thumb_area.height > 1 {
@@ -297,9 +444,7 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
             height: 1,
         };
         f.render_widget(
-            Paragraph::new(dur).style(
-                Style::default().bg(Color::Black).fg(Color::White),
-            ),
+            Paragraph::new(dur).style(Style::default().bg(Color::Black).fg(Color::White)),
             r,
         );
     }
@@ -320,17 +465,11 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                format!("{}{}", v.channel, check),
-                Style::default().fg(DIM),
-            ),
+            Span::styled(format!("{}{}", v.channel, check), Style::default().fg(DIM)),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                format!("{} • {}", v.views, v.age),
-                Style::default().fg(DIM),
-            ),
+            Span::styled(format!("{} • {}", v.views, v.age), Style::default().fg(DIM)),
         ]),
     ];
     f.render_widget(Paragraph::new(info), info_area);
@@ -348,7 +487,5 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn block(title: &str) -> Block<'_> {
-    Block::default()
-        .title(title)
-        .style(Style::default().bg(BG))
+    Block::default().title(title).style(Style::default().bg(BG))
 }

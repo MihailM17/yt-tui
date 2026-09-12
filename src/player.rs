@@ -119,6 +119,6 @@ pub fn open_browser(url: &str) {
 }
 
 #[allow(dead_code)]
-pub fn record_played(video_id: &str, title: &str, cfg: &config::Config) {
-    config::push_history(cfg, video_id, title);
+pub fn record_played(video_id: &str, title: &str, channel: &str, cfg: &config::Config) {
+    config::push_history(cfg, video_id, title, channel);
 }

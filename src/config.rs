@@ -19,10 +19,23 @@ pub struct Config {
     /// mpv window niceties (borderless + autofit). Set false for stock mpv.
     #[serde(default = "default_true")]
     pub mpv_pretty: bool,
+    /// Browser to read YouTube cookies from for login-gated feeds
+    /// (Watch Later, Liked, private subs). You stay logged in via your
+    /// normal browser — the TUI never sees your password.
+    /// One of: chrome, chromium, brave, edge, firefox, safari (macOS).
+    #[serde(default = "default_browser")]
+    pub browser: String,
+    /// If true, yt-dlp calls add `--cookies-from-browser <browser>`.
+    /// Turn on after `L` login test succeeds.
+    #[serde(default)]
+    pub use_cookies: bool,
 }
 
 fn default_player() -> String {
     "mpv".into()
+}
+fn default_browser() -> String {
+    "chrome".into()
 }
 fn default_true() -> bool {
     true
@@ -41,6 +54,8 @@ impl Default for Config {
             player: default_player(),
             player_args: vec![],
             mpv_pretty: true,
+            browser: default_browser(),
+            use_cookies: false,
         }
     }
 }
@@ -79,9 +94,16 @@ pub fn load() -> Config {
         }
     }
     let cfg = Config::default();
-    let _ = fs::create_dir_all(base_dir());
-    let _ = fs::write(&p, serde_json::to_string_pretty(&cfg).unwrap());
+    save(&cfg);
     cfg
+}
+
+pub fn save(cfg: &Config) {
+    let _ = fs::create_dir_all(base_dir());
+    let _ = fs::write(
+        base_dir().join("config.json"),
+        serde_json::to_string_pretty(cfg).unwrap_or_default(),
+    );
 }
 
 // --- watch history (capped JSON, tiny) ---
@@ -90,6 +112,7 @@ pub fn load() -> Config {
 pub struct HistoryEntry {
     pub id: String,
     pub title: String,
+    pub channel: String,
     pub at: String,
 }
 
@@ -98,13 +121,34 @@ pub fn load_history(max: usize) -> Vec<HistoryEntry> {
     if let Ok(bytes) = fs::read(&p) {
         if let Ok(mut h) = serde_json::from_slice::<Vec<HistoryEntry>>(&bytes) {
             h.truncate(max);
+            // back-compat: old entries lack `channel`
             return h;
+        }
+        // migrate old {id,title,at} shape
+        if let Ok(old) = serde_json::from_slice::<Vec<OldHistory>>(&bytes) {
+            return old
+                .into_iter()
+                .map(|o| HistoryEntry {
+                    id: o.id,
+                    title: o.title,
+                    channel: String::new(),
+                    at: o.at,
+                })
+                .take(max)
+                .collect();
         }
     }
     vec![]
 }
 
-pub fn push_history(cfg: &Config, id: &str, title: &str) {
+#[derive(Debug, Deserialize)]
+struct OldHistory {
+    id: String,
+    title: String,
+    at: String,
+}
+
+pub fn push_history(cfg: &Config, id: &str, title: &str, channel: &str) {
     let mut h = load_history(cfg.max_history);
     h.retain(|e| e.id != id);
     h.insert(
@@ -112,6 +156,7 @@ pub fn push_history(cfg: &Config, id: &str, title: &str) {
         HistoryEntry {
             id: id.to_string(),
             title: title.to_string(),
+            channel: channel.to_string(),
             at: chrono_stamp(),
         },
     );
@@ -120,6 +165,13 @@ pub fn push_history(cfg: &Config, id: &str, title: &str) {
     let _ = fs::write(
         data_dir().join("history.json"),
         serde_json::to_string_pretty(&h).unwrap_or_default(),
+    );
+}
+
+pub fn clear_history() {
+    let _ = fs::write(
+        data_dir().join("history.json"),
+        "[]",
     );
 }
 

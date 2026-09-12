@@ -24,14 +24,25 @@ Deps at runtime for playback (wired in `src/player.rs`):
 
 ## Keys
 
-- Mouse: click search to type, click video to select (again to play), click chips to filter, wheel to scroll
-- `hjkl` / arrows — navigate grid
-- `Enter` / `p` — play, `o` — open in browser
-- `/` — live-search via yt-dlp (background, UI stays responsive), `Esc` — exit
-- `r` — load subs feed, `m` — back to offline mock
-- `1-9`, `Tab` — topic chips
-- `g` / `G` — top / bottom
-- `q` or `Ctrl-C` — quit
+- Mouse: click search/sidebar/videos, wheel scroll
+- `0` home • `S` subs • `H` history • `L` login test • `W` watch later • `T` liked
+- Subs view: `Enter` load channel • `a` add @handle • `d` remove • `r` refresh all
+- History view: `Enter` replay • `D` clear (local only)
+- Home: `hjkl`/arrows, `Enter`/`p` play, `o` browser, `/` live-search, `r` feed, `m` mock
+- `q` or `Ctrl-C` quit
+
+## Login (no password in TUI — by design)
+
+Google blocks password logins from terminals. Instead yt-tui borrows your
+normal browser's YouTube cookies (same trick `yt-dlp --cookies-from-browser` uses):
+
+1. Open YouTube in Chrome and log in normally
+2. In `~/.config/yt-tui/config.json` set `"browser": "chrome"` (or brave/edge/firefox), `"use_cookies": false` first
+3. In yt-tui press `L` — should say `login OK via chrome cookies`
+4. Set `"use_cookies": true`, restart. `W`/`T` now load Watch Later / Liked, `r` includes private subs.
+
+History never needs login — it's local (`~/.local/share/yt-tui/history.json`).
+Subs are just `@handles` in config.json — `S` then `a` to add, no login needed for public channels.
 
 ## Player (mpv not the only option)
 

@@ -3,44 +3,96 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::app::Video;
+use crate::{app::Video, config};
 
-/// Lightweight search via installed `yt-dlp` (no API key, no TLS in our binary).
-/// `yt-dlp --flat-playlist -J "ytsearch12:query"` returns compact JSON.
-/// Runs in a background thread (see App) so UI never blocks.
-pub fn search(query: &str, limit: usize) -> Result<Vec<Video>, String> {
-    let target = format!("ytsearch{}:{query}", limit.min(20));
+/// Lightweight fetch via installed `yt-dlp` (no API key, no TLS in our binary).
+/// Runs in background threads (see App) so UI never blocks.
+
+fn base_args(cfg: &config::Config) -> Vec<String> {
+    let mut a = vec![
+        "--flat-playlist".to_string(),
+        "-J".to_string(),
+        "--no-warnings".to_string(),
+    ];
+    if cfg.use_cookies && !cfg.browser.is_empty() {
+        a.push("--cookies-from-browser".to_string());
+        a.push(cfg.browser.clone());
+    }
+    a
+}
+
+fn run_ytdlp(args: &[String]) -> Result<Vec<u8>, String> {
     let out = Command::new("yt-dlp")
-        .args(["--flat-playlist", "-J", "--no-warnings", &target])
+        .args(args)
         .output()
         .map_err(|e| format!("yt-dlp not found ({e})"))?;
-
     if !out.status.success() {
         return Err(format!(
-            "yt-dlp search failed: {}",
+            "yt-dlp failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    parse_flat(&out.stdout)
+    Ok(out.stdout)
+}
+
+pub fn search(cfg: &config::Config, query: &str, limit: usize) -> Result<Vec<Video>, String> {
+    let target = format!("ytsearch{}:{query}", limit.min(20));
+    let mut args = base_args(cfg);
+    args.push(target);
+    parse_flat(&run_ytdlp(&args)?)
 }
 
 /// Channel videos via `yt-dlp --flat-playlist -J <url>` (works for @handles).
-pub fn channel_videos(url: &str, limit: usize) -> Result<Vec<Video>, String> {
-    let mut cmd = Command::new("yt-dlp");
-    cmd.args(["--flat-playlist", "-J", "--no-warnings"]);
-    // playlist end keeps it fast + small
-    cmd.args(["--playlist-end", &limit.min(15).to_string(), url]);
-    let out = cmd
-        .output()
-        .map_err(|e| format!("yt-dlp not found ({e})"))?;
+pub fn channel_videos(
+    cfg: &config::Config,
+    url: &str,
+    limit: usize,
+) -> Result<Vec<Video>, String> {
+    let mut args = base_args(cfg);
+    args.push("--playlist-end".to_string());
+    args.push(limit.min(15).to_string());
+    args.push(url.to_string());
+    parse_flat(&run_ytdlp(&args)?)
+}
 
-    if !out.status.success() {
-        return Err(format!(
-            "yt-dlp feed failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+/// Login-gated playlists. Require `use_cookies=true` + logged-in browser.
+/// WL = Watch Later, LL = Liked videos.
+pub fn private_playlist(
+    cfg: &config::Config,
+    which: &str,
+    limit: usize,
+) -> Result<Vec<Video>, String> {
+    let url = match which {
+        "later" => "https://www.youtube.com/playlist?list=WL",
+        "liked" => "https://www.youtube.com/playlist?list=LL",
+        "subs" => "https://www.youtube.com/feed/subscriptions",
+        _ => return Err("unknown playlist".into()),
+    };
+    channel_videos(cfg, url, limit)
+}
+
+/// Test cookie login: fetch 1 item from subs feed.
+/// Ok(handle) on success, Err(hint) on failure.
+pub fn auth_test(cfg: &config::Config) -> Result<String, String> {
+    let mut args = base_args(cfg);
+    // force cookies even if use_cookies=false, to test before enabling
+    if !cfg.use_cookies {
+        args.push("--cookies-from-browser".to_string());
+        args.push(cfg.browser.clone());
     }
-    parse_flat(&out.stdout)
+    args.push("--playlist-end".to_string());
+    args.push("1".to_string());
+    args.push("https://www.youtube.com/feed/subscriptions".to_string());
+    let raw = run_ytdlp(&args).map_err(|e| {
+        format!("{e} — is YouTube open+logged in under browser=\"{}\" in config.json?", cfg.browser)
+    })?;
+    let vids = parse_flat(&raw)?;
+    Ok(format!(
+        "login OK via {} cookies ({} item{}) — set use_cookies=true to keep it",
+        cfg.browser,
+        vids.len().max(1),
+        if vids.len() == 1 { "" } else { "s" }
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +114,7 @@ struct Entry {
     view_count: Option<u64>,
 }
 
-fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
+pub fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
     let flat: Flat =
         serde_json::from_slice(json).map_err(|e| format!("parse yt-dlp json: {e}"))?;
     let mut out = vec![];
@@ -91,7 +143,7 @@ fn parse_flat(json: &[u8]) -> Result<Vec<Video>, String> {
     Ok(out)
 }
 
-fn fmt_views(n: u64) -> String {
+pub fn fmt_views(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M views", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -103,7 +155,7 @@ fn fmt_views(n: u64) -> String {
     }
 }
 
-fn fmt_dur(s: f64) -> String {
+pub fn fmt_dur(s: f64) -> String {
     let s = s as u64;
     format!("{}:{:02}", s / 60, s % 60)
 }
