@@ -24,14 +24,25 @@ Deps at runtime for playback (wired in `src/player.rs`):
 
 ## Keys
 
+- Mouse: click search to type, click video to select (again to play), click chips to filter, wheel to scroll
 - `hjkl` / arrows — navigate grid
-- `Enter` / `p` — play via `mpv` (falls back to browser if mpv missing)
-- `o` — open in browser
+- `Enter` / `p` — play, `o` — open in browser
 - `/` — live-search via yt-dlp (background, UI stays responsive), `Esc` — exit
 - `r` — load subs feed, `m` — back to offline mock
 - `1-9`, `Tab` — topic chips
 - `g` / `G` — top / bottom
 - `q` or `Ctrl-C` — quit
+
+## Player (mpv not the only option)
+
+`~/.config/yt-tui/config.json`:
+```json
+{ "player": "mpv", "player_args": [], "mpv_pretty": true }
+```
+- `"mpv"` — lightest, best TUI match. Pretty args (borderless+autofit+slim OSC) on by default.
+- `"iina"` — macOS native, prettiest on Mac. `brew install --cask iina`.
+- `"vlc"` — familiar GUI, heavier.
+- `"browser"` — stock YouTube (ads return).
 
 ## Efficient by design (low RAM/storage)
 

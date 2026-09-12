@@ -12,7 +12,9 @@ use crate::config;
 // ---------------------------------------------------------------------------
 
 pub fn procedural(seed: u64, hue: u8, w_cells: u16, h_rows: u16) -> Vec<Line<'static>> {
-    const SHADES: &[char] = &[' ', '░', '▒', '▓', '█', '▚', '▞', '▙', '▛', '#', '@'];
+    // Half-block mode: each terminal cell holds 2 vertical pixels ('▀' with
+    // fg=top, bg=bottom). Terminal cells are ~2x taller than wide, so 1px=1cell
+    // looks vertically squashed. This fixes the squash for free (same RAM).
     let w = w_cells as usize;
     let h = h_rows as usize;
 
@@ -20,13 +22,17 @@ pub fn procedural(seed: u64, hue: u8, w_cells: u16, h_rows: u16) -> Vec<Line<'st
     for y in 0..h {
         let mut spans = Vec::with_capacity(w);
         for x in 0..w {
-            let n = hash(seed, x as u64, y as u64, w as u64);
-            let shade = SHADES[(n % SHADES.len() as u64) as usize];
-            let t = n as f32 / u64::MAX as f32;
-            let (r, g, b) = hue_rgb(hue, x, y, w, h, t);
+            let n_top = hash(seed, x as u64, (y * 2) as u64, w as u64);
+            let n_bot = hash(seed, x as u64, (y * 2 + 1) as u64, w as u64);
+            let t = n_top as f32 / u64::MAX as f32;
+            let b = n_bot as f32 / u64::MAX as f32;
+            let (r1, g1, b1) = hue_rgb(hue, x, y * 2, w, h * 2, t);
+            let (r2, g2, b2) = hue_rgb(hue, x, y * 2 + 1, w, h * 2, b);
             spans.push(Span::styled(
-                shade.to_string(),
-                Style::default().fg(Color::Rgb(r, g, b)),
+                "▀".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(r1, g1, b1))
+                    .bg(Color::Rgb(r2, g2, b2)),
             ));
         }
         out.push(Line::from(spans));
@@ -93,25 +99,41 @@ fn fetch_jpg(video_id: &str, cache_mb: u64) -> Option<Vec<u8>> {
 }
 
 fn from_jpeg(bytes: &[u8], w_cells: u16, h_rows: u16) -> Option<Vec<Line<'static>>> {
+    // You were right — old code resized to (w x h) pixels for (w x h) cells,
+    // but a terminal cell is ~2x taller than wide, so everything looked
+    // squashed vertically. Fix: decode at (w x h*2) and pack 2 pixels per
+    // cell with '▀' (fg=top, bg=bottom). Aspect-fit with letterbox so 16:9
+    // thumbs don't stretch to fill the card. Same RAM, correct geometry.
     let img = image::load_from_memory(bytes).ok()?;
     let rgb = img.to_rgb8();
-    let w = w_cells as u32;
-    let h = h_rows as u32;
-    let small = image::imageops::resize(&rgb, w, h, image::imageops::FilterType::Triangle);
+    let w = w_cells.max(8) as u32;
+    let h = h_rows.max(4) as u32;
+    let buf_h = h * 2;
+    let (sw, sh) = (rgb.width().max(1), rgb.height().max(1));
 
-    const SHADES: &[char] = &[' ', '░', '▒', '▓', '█'];
+    // fit source inside (w x buf_h), preserve aspect
+    let scale = (w as f32 / sw as f32).min(buf_h as f32 / sh as f32);
+    let nw = ((sw as f32 * scale) as u32).clamp(1, w);
+    let nh = ((sh as f32 * scale) as u32).clamp(1, buf_h);
+    let fitted = image::imageops::resize(&rgb, nw, nh, image::imageops::FilterType::Triangle);
+
+    // letterbox onto black canvas
+    let mut canvas = image::RgbImage::from_pixel(w, buf_h, image::Rgb([8, 10, 16]));
+    let ox = (w - nw) / 2;
+    let oy = (buf_h - nh) / 2;
+    image::imageops::replace(&mut canvas, &fitted, ox as i64, oy as i64);
+
     let mut out = Vec::with_capacity(h as usize);
     for y in 0..h {
         let mut spans = Vec::with_capacity(w as usize);
         for x in 0..w {
-            let p = small.get_pixel(x, y);
-            let (r, g, b) = (p[0], p[1], p[2]);
-            // luminance -> shade, color = pixel (truecolor thumb like mockup)
-            let lum = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
-            let shade = SHADES[(lum * (SHADES.len() - 1) as f32) as usize];
+            let t = canvas.get_pixel(x, y * 2);
+            let b = canvas.get_pixel(x, y * 2 + 1);
             spans.push(Span::styled(
-                shade.to_string(),
-                Style::default().fg(Color::Rgb(r, g, b)),
+                "▀".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(t[0], t[1], t[2]))
+                    .bg(Color::Rgb(b[0], b[1], b[2])),
             ));
         }
         out.push(Line::from(spans));

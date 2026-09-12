@@ -10,6 +10,22 @@ pub struct Config {
     pub max_history: usize,
     /// on-disk thumb jpg cache cap in MB
     pub thumb_cache_mb: u64,
+    /// Player: "mpv" (default, lightest) | "iina" (macOS native, prettiest)
+    /// | "vlc" | "browser". Extra args appended to player command.
+    #[serde(default = "default_player")]
+    pub player: String,
+    #[serde(default)]
+    pub player_args: Vec<String>,
+    /// mpv window niceties (borderless + autofit). Set false for stock mpv.
+    #[serde(default = "default_true")]
+    pub mpv_pretty: bool,
+}
+
+fn default_player() -> String {
+    "mpv".into()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -22,6 +38,9 @@ impl Default for Config {
             ],
             max_history: 100,
             thumb_cache_mb: 20,
+            player: default_player(),
+            player_args: vec![],
+            mpv_pretty: true,
         }
     }
 }

@@ -80,7 +80,7 @@ fn past_status(app: &App) -> String {
     app.status.clone()
 }
 
-fn render_header(f: &mut Frame, app: &App, area: Rect) {
+fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -89,6 +89,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(26),
         ])
         .split(area);
+    app.search_rect = chunks[1];
 
     let logo = Paragraph::new(vec![
         Line::from(vec![
@@ -141,7 +142,8 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(right, chunks[2]);
 }
 
-fn render_chips(f: &mut Frame, app: &App, area: Rect) {
+fn render_chips(f: &mut Frame, app: &mut App, area: Rect) {
+    app.chips_rect = area;
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for (i, c) in app.chips.iter().enumerate() {
         let active = i == app.active_chip;
@@ -227,6 +229,7 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
         1
     };
     app.cols = cols;
+    app.card_hits.clear();
     let rows: usize = 3;
     let row_h = area.height / rows.max(1) as u16;
 
@@ -250,6 +253,7 @@ fn render_grid(f: &mut Frame, app: &mut App, area: Rect) {
             let flat_pos = idx;
             let video_idx = app.filtered[idx];
             let is_sel = flat_pos == app.selected;
+            app.card_hits.push((col_areas[c], flat_pos));
             render_card(f, app, col_areas[c], video_idx, is_sel);
         }
     }

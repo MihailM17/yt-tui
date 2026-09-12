@@ -1,8 +1,8 @@
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver};
 
-use ratatui::text::Line;
+use ratatui::{layout::Rect, text::Line};
 
 use crate::{config, data, player, thumb, youtube};
 
@@ -38,6 +38,10 @@ pub struct App {
     rx: Option<Receiver<Result<Vec<Video>, String>>>,
     thumb_cache: HashMap<String, Vec<Line<'static>>>,
     thumb_order: VecDeque<String>,
+    // mouse hit-test regions (filled by ui.rs each frame)
+    pub search_rect: Rect,
+    pub chips_rect: Rect,
+    pub card_hits: Vec<(Rect, usize)>,
 }
 
 impl App {
@@ -55,10 +59,10 @@ impl App {
         };
         let mpv_ok = player::has_mpv();
         let mut status = String::from(
-            "hjkl navigate • Enter play • / live-search • r feed • q quit",
+            "click search/videos • wheel scroll • hjkl • Enter play • / search • r feed • q quit",
         );
         if !mpv_ok {
-            status.push_str(" • mpv missing (brew install mpv or Enter opens browser)");
+            status.push_str(" • mpv missing (Enter opens browser)");
         }
         Self {
             videos,
@@ -79,6 +83,9 @@ impl App {
             rx: None,
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
+            search_rect: Rect::default(),
+            chips_rect: Rect::default(),
+            card_hits: vec![],
         }
     }
 
@@ -121,8 +128,47 @@ impl App {
         }
     }
 
-    pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        if self.searching {
+    /// Mouse: click search to type, click video to select (again to play),
+    /// click chips row to cycle filter, wheel to scroll.
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let (x, y) = (ev.column, ev.row);
+                if inside(self.search_rect, x, y) {
+                    self.searching = true;
+                    return;
+                }
+                if inside(self.chips_rect, x, y) {
+                    // proportional chip pick (chips laid left-to-right)
+                    let w = self.chips_rect.width.max(1) as usize;
+                    let rel = x.saturating_sub(self.chips_rect.x) as usize;
+                    let i = rel * self.chips.len() / w;
+                    self.active_chip = i.min(self.chips.len() - 1);
+                    self.status = format!("filter: {}", self.chips[self.active_chip]);
+                    return;
+                }
+                for (rect, idx) in self.card_hits.clone() {
+                    if inside(rect, x, y) {
+                        if self.selected == idx {
+                            self.play_selected();
+                        } else {
+                            self.selected = idx;
+                            let row = self.selected / self.cols.max(1);
+                            if row < self.row_offset {
+                                self.row_offset = row;
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => self.move_sel(-(self.cols as isize)),
+            MouseEventKind::ScrollDown => self.move_sel(self.cols as isize),
+            _ => {}
+        }
+    }
+
+    pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {        if self.searching {
             match code {
                 KeyCode::Esc => {
                     self.searching = false;
@@ -303,7 +349,7 @@ impl App {
         }
         config::push_history(&self.cfg, &v.id, &v.title);
         self.status = format!("▶ resolving {} …", short(&v.title));
-        match player::play(&v.id) {
+        match player::play_with(&v.id, &self.cfg) {
             Ok(msg) => self.status = msg,
             Err(e) => self.status = format!("play failed: {e}"),
         }
@@ -347,4 +393,8 @@ impl App {
 
 fn short(s: &str) -> String {
     s.chars().take(50).collect()
+}
+
+fn inside(r: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
