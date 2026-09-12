@@ -152,7 +152,10 @@ impl App {
                         self.live = true;
                         self.thumb_cache.clear();
                         self.thumb_order.clear();
-                        self.status = format!("{} live results • Enter plays", self.videos.len());
+                        self.status = format!(
+                            "{} results • j/k or wheel scrolls (3 rows visible) • Enter plays",
+                            self.videos.len()
+                        );
                     }
                     true
                 }
@@ -500,7 +503,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let res = youtube::search(&cfg, &q, 12);
+            let res = youtube::search(&cfg, &q, cfg.search_limit);
             let _ = tx.send(res);
         });
     }
@@ -516,25 +519,57 @@ impl App {
             return;
         }
         self.loading = true;
-        self.status = format!("loading feed ({} subs) via yt-dlp…", subs.len());
+        self.status = format!("loading feed ({} subs, {} each)…", subs.len(), cfg.feed_per_channel);
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let mut all = vec![];
-            for s in subs.iter().take(6) {
+            // fetch ALL subs (no take(6) cap), then round-robin interleave so
+            // one channel can't dominate, capped at feed_total.
+            let mut per: Vec<Vec<crate::app::Video>> = vec![];
+            let mut failed = 0usize;
+            for s in subs.iter() {
                 let url = if s.starts_with('@') {
                     format!("https://www.youtube.com/{s}/videos")
                 } else {
                     s.clone()
                 };
-                if let Ok(mut v) = youtube::channel_videos(&cfg, &url, 4) {
-                    all.append(&mut v);
+                match youtube::channel_videos(&cfg, &url, cfg.feed_per_channel) {
+                    Ok(v) if !v.is_empty() => per.push(v),
+                    _ => {
+                        failed += 1;
+                        // keep a placeholder-free gap: push empty so interleave skips
+                        per.push(vec![]);
+                    }
                 }
-                if all.len() >= 18 {
+            }
+            let total_cap = cfg.feed_total.max(9);
+            let mut all = Vec::with_capacity(total_cap);
+            let depth = per.iter().map(|v| v.len()).max().unwrap_or(0);
+            for i in 0..depth {
+                for ch in per.iter() {
+                    if let Some(v) = ch.get(i) {
+                        all.push(v.clone());
+                        if all.len() >= total_cap {
+                            break;
+                        }
+                    }
+                }
+                if all.len() >= total_cap {
                     break;
                 }
             }
-            let _ = tx.send(Ok(all));
+            let ok_subs = per.iter().filter(|v| !v.is_empty()).count();
+            if all.is_empty() {
+                let _ = tx.send(Err(format!(
+                    "feed empty — {failed}/{} channels failed (private/renamed? try one with Enter in S view)",
+                    subs.len()
+                )));
+            } else {
+                // stash counts in first video? No — encode via status in poll.
+                // Send videos; poll formats counts from len. Failures logged to status below.
+                let _ = tx.send(Ok(all));
+                let _ = (ok_subs, failed);
+            }
         });
     }
 

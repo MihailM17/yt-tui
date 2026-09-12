@@ -42,6 +42,14 @@ pub struct Config {
     /// fit in the 20MB disk cap. Needs restart + cache clear to take effect.
     #[serde(default = "default_thumb_quality")]
     pub thumb_quality: String,
+    /// Feed sizes. `r` loads ALL subs (no more take(6) cap):
+    /// per-channel videos x subs, interleaved, capped at total.
+    #[serde(default = "default_feed_per_channel")]
+    pub feed_per_channel: usize,
+    #[serde(default = "default_feed_total")]
+    pub feed_total: usize,
+    #[serde(default = "default_search_limit")]
+    pub search_limit: usize,
 }
 
 fn default_player() -> String {
@@ -52,6 +60,15 @@ fn default_browser() -> String {
 }
 fn default_thumb_quality() -> String {
     "mq".into()
+}
+fn default_feed_per_channel() -> usize {
+    5
+}
+fn default_feed_total() -> usize {
+    40
+}
+fn default_search_limit() -> usize {
+    24
 }
 fn default_true() -> bool {
     true
@@ -74,6 +91,9 @@ impl Default for Config {
             use_cookies: false,
             cookies_file: String::new(),
             thumb_quality: default_thumb_quality(),
+            feed_per_channel: default_feed_per_channel(),
+            feed_total: default_feed_total(),
+            search_limit: default_search_limit(),
         }
     }
 }
