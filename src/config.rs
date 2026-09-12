@@ -57,6 +57,11 @@ pub struct Config {
     /// Where `d`/`D` save. Default ~/Downloads/yt-tui.
     #[serde(default)]
     pub download_dir: String,
+    /// Thumbnails: "auto" (images if terminal supports kitty/sixel, else blocks),
+    /// "images" (force real images, blocks fallback per-card), "blocks" (ASCII art).
+    /// Toggle live in Settings (gear icon / `,`).
+    #[serde(default = "default_thumb_mode")]
+    pub thumb_mode: String,
 }
 
 fn default_player() -> String {
@@ -79,6 +84,9 @@ fn default_search_limit() -> usize {
 }
 fn default_quality() -> String {
     "best".into()
+}
+fn default_thumb_mode() -> String {
+    "auto".into()
 }
 fn default_true() -> bool {
     true
@@ -106,6 +114,7 @@ impl Default for Config {
             search_limit: default_search_limit(),
             quality: default_quality(),
             download_dir: String::new(),
+            thumb_mode: default_thumb_mode(),
         }
     }
 }
@@ -153,6 +162,7 @@ pub fn load() -> Config {
                 "\"player\"",
                 "\"browser\"",
                 "\"thumb_quality\"",
+                "\"thumb_mode\"",
                 "\"feed_per_channel\"",
                 "\"cookies_file\"",
             ] {

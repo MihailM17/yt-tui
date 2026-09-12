@@ -50,6 +50,20 @@ pub fn thumb_dir() -> std::path::PathBuf {
     crate::config::cache_dir().join("thumbs")
 }
 
+/// Raw decoded thumbnail for real-image (kitty/sixel) rendering.
+/// None for mock entries or any fetch/decode failure (caller falls back).
+pub fn load_dynamic(
+    video_id: &str,
+    cache_mb: u64,
+    quality: &str,
+) -> Option<image::DynamicImage> {
+    if video_id.starts_with("mock") {
+        return None;
+    }
+    let bytes = fetch_jpg(video_id, cache_mb, quality)?;
+    image::load_from_memory(&bytes).ok()
+}
+
 /// Try real thumbnail, fall back to procedural on any failure.
 /// `is_mock` ids (mock1..) always use procedural — no network.
 /// Quality from config: default/mq/hq/sd (see config.rs).

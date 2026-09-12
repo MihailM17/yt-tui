@@ -6,6 +6,7 @@ use ratatui::{layout::Rect, text::Line};
 
 use crate::{config, data, player, thumb, youtube};
 use crate::youtube::{SortMode, VideoInfo, Comment};
+use ratatui_image::{picker::{Picker, ProtocolType}, protocol::StatefulProtocol};
 
 #[derive(Clone)]
 pub struct Video {
@@ -27,12 +28,19 @@ pub enum View {
     History,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Overlay {
     Info { vid: String, info: VideoInfo },
     Comments { vid: String, items: Vec<Comment> },
     Queue,
+    Settings,
     Help,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TransportAction {
+    Pause,
+    Next,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,10 +92,19 @@ pub struct App {
     rx_comments: Option<std::sync::mpsc::Receiver<Result<(String, Vec<Comment>), String>>>,
     rx_dl: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     rx_new: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    rx_import: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    pub picker: Option<Picker>,
+    img_protos: std::collections::HashMap<String, StatefulProtocol>,
+    pub settings_sel: usize,
+    pub settings_hits: Vec<(Rect, usize)>,
+    pub close_rect: Rect,
+    pub gear_rect: Rect,
+    pub transport_hits: Vec<(Rect, TransportAction)>,
+    pub hover: Option<(u16, u16)>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(picker: Option<Picker>) -> Self {
         let cfg = config::load();
         let videos = data::mock_videos();
         let filtered = (0..videos.len()).collect();
@@ -146,7 +163,57 @@ impl App {
             rx_comments: None,
             rx_dl: None,
             rx_new: None,
+            rx_import: None,
+            picker,
+            img_protos: std::collections::HashMap::new(),
+            settings_sel: 0,
+            settings_hits: vec![],
+            close_rect: Rect::default(),
+            gear_rect: Rect::default(),
+            transport_hits: vec![],
+            hover: None,
         }
+    }
+
+    /// Real images only when mode allows AND terminal speaks kitty/sixel/iterm.
+    pub fn want_images(&self) -> bool {
+        match self.cfg.thumb_mode.as_str() {
+            "blocks" => false,
+            "images" => self.picker.is_some(),
+            _ => matches!(
+                self.picker.as_ref().map(|p| p.protocol_type()),
+                Some(ProtocolType::Kitty) | Some(ProtocolType::Sixel) | Some(ProtocolType::Iterm2)
+            ),
+        }
+    }
+
+    pub fn gfx_label(&self) -> String {
+        match self.picker.as_ref().map(|p| p.protocol_type()) {
+            Some(ProtocolType::Kitty) => "kitty graphics".into(),
+            Some(ProtocolType::Sixel) => "sixel graphics".into(),
+            Some(ProtocolType::Iterm2) => "iterm graphics".into(),
+            _ => "no image protocol (blocks mode)".into(),
+        }
+    }
+
+    /// Cached stateful image protocol for a card (None → caller uses blocks).
+    pub fn img_proto(&mut self, video_id: &str, w: u16, h: u16) -> Option<&mut StatefulProtocol> {
+        if !self.want_images() || video_id.starts_with("mock") { return None; }
+        let key = format!("img-{video_id}-{}x{}", w.max(8), h.max(4));
+        if self.img_protos.contains_key(&key) {
+            return self.img_protos.get_mut(&key);
+        }
+        let dyn_img = thumb::load_dynamic(video_id, self.cfg.thumb_cache_mb, &self.cfg.thumb_quality)?;
+        let picker = self.picker.as_ref()?;
+        let proto = picker.new_resize_protocol(dyn_img);
+        self.img_protos.insert(key.clone(), proto);
+        while self.img_protos.len() > 24 {
+            // drop an arbitrary old entry (HashMap has no order; size cap is what matters)
+            if let Some(k) = self.img_protos.keys().next().cloned() {
+                self.img_protos.remove(&k);
+            } else { break; }
+        }
+        self.img_protos.get_mut(&key)
     }
 
     // ---------------- views ----------------
@@ -289,6 +356,31 @@ impl App {
                 }
             }
         }
+        if let Some(rx) = &self.rx_import {
+            match rx.try_recv() {
+                Ok(Ok(channels)) => {
+                    self.loading = false;
+                    let mut added = 0;
+                    for ch in channels {
+                        if !self.cfg.subscriptions.iter().any(|s| s == &ch) {
+                            self.cfg.subscriptions.push(ch.clone());
+                            added += 1;
+                        }
+                    }
+                    config::save(&self.cfg);
+                    self.subs = self.cfg.subscriptions.iter().map(|s| (s.clone(), false)).collect();
+                    self.status = if added == 0 {
+                        format!("account subs already in config ({} total)", self.cfg.subscriptions.len())
+                    } else {
+                        format!("imported {added} channels ({} total) — r refreshes feed", self.cfg.subscriptions.len())
+                    };
+                    self.rx_import = None;
+                }
+                Ok(Err(e)) => { self.loading = false; self.status = format!("import failed: {e}"); self.rx_import = None; }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(_) => { self.loading = false; self.rx_import = None; }
+            }
+        }
         if let Some(rx) = &self.rx_new {
             match rx.try_recv() {
                 Ok(fresh) => {
@@ -327,6 +419,36 @@ impl App {
                 if inside(self.search_rect, x, y) {
                     self.searching = true;
                     self.adding_sub = false;
+                    return;
+                }
+                if inside(self.close_rect, x, y) && self.overlay.is_some() {
+                    self.overlay = None;
+                    self.overlay_scroll = 0;
+                    return;
+                }
+                if inside(self.gear_rect, x, y) {
+                    self.overlay = Some(Overlay::Settings);
+                    self.overlay_scroll = 0;
+                    self.settings_sel = 0;
+                    return;
+                }
+                for (rect, act) in self.transport_hits.clone() {
+                    if inside(rect, x, y) {
+                        match act {
+                            TransportAction::Pause => self.toggle_pause(),
+                            TransportAction::Next => self.next_track(),
+                        }
+                        return;
+                    }
+                }
+                if self.overlay == Some(Overlay::Settings) {
+                    for (rect, idx) in self.settings_hits.clone() {
+                        if inside(rect, x, y) {
+                            self.settings_sel = idx;
+                            self.settings_cycle(idx);
+                            return;
+                        }
+                    }
                     return;
                 }
                 for (rect, a) in self.sidebar_hits.clone() {
@@ -380,6 +502,7 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Moved => { self.hover = Some((ev.column, ev.row)); }
             MouseEventKind::ScrollUp => match self.view {
                 View::Home => self.move_sel(-(self.cols as isize)),
                 View::Subs => self.move_sub(-1),
@@ -397,17 +520,31 @@ impl App {
     // ---------------- keyboard ----------------
 
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        // overlays eat keys first (scroll + close)
+        // overlays eat keys first
         if self.overlay.is_some() {
+            let is_settings = matches!(self.overlay, Some(Overlay::Settings));
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => { self.overlay = None; self.overlay_scroll = 0; return; }
-                KeyCode::Char('j') | KeyCode::Down => { self.overlay_scroll += 1; return; }
-                KeyCode::Char('k') | KeyCode::Up => { self.overlay_scroll = self.overlay_scroll.saturating_sub(1); return; }
-                KeyCode::Enter => {
-                    // in queue overlay, Enter plays the queue
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if is_settings {
+                        let n = self.settings_rows().len();
+                        self.settings_sel = (self.settings_sel + 1).min(n.saturating_sub(1));
+                    } else { self.overlay_scroll += 1; }
+                    return;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if is_settings {
+                        self.settings_sel = self.settings_sel.saturating_sub(1);
+                    } else { self.overlay_scroll = self.overlay_scroll.saturating_sub(1); }
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
                     if matches!(self.overlay, Some(Overlay::Queue)) {
                         self.overlay = None;
                         self.play_queue();
+                    } else if is_settings {
+                        let i = self.settings_sel;
+                        self.settings_cycle(i);
                     }
                     return;
                 }
@@ -583,6 +720,9 @@ impl App {
             }
             KeyCode::Char('[') => self.nudge_speed(-1.0),
             KeyCode::Char(']') => self.nudge_speed(1.0),
+            KeyCode::Char(',') => { self.overlay = Some(Overlay::Settings); self.overlay_scroll = 0; self.settings_sel = 0; }
+            KeyCode::Char(' ') => self.toggle_pause(),
+            KeyCode::Char('>') => self.next_track(),
             KeyCode::Char('?') => { self.overlay = Some(Overlay::Help); self.overlay_scroll = 0; }
             KeyCode::Tab => {
                 self.active_chip = (self.active_chip + 1) % self.chips.len();
@@ -1020,6 +1160,109 @@ impl App {
             } else {
                 break;
             }
+        }
+    }
+
+    // ---------------- settings ----------------
+
+    /// (label, value) rows for the Settings menu. Action rows have value "→".
+    pub fn settings_rows(&self) -> Vec<(String, String)> {
+        let onoff = |b: bool| if b { "on".to_string() } else { "off".to_string() };
+        vec![
+            ("Player".into(), self.cfg.player.clone()),
+            ("Stream quality".into(), self.cfg.quality.clone()),
+            ("Thumbnails".into(), format!("{} ({})", self.cfg.thumb_mode, self.gfx_label())),
+            ("Thumb detail".into(), self.cfg.thumb_quality.clone()),
+            ("Cookie browser".into(), self.cfg.browser.clone()),
+            ("Use cookies".into(), onoff(self.cfg.use_cookies)),
+            ("Cookies file".into(), if self.cfg.cookies_file.is_empty() { "not set".into() } else { self.cfg.cookies_file.clone() }),
+            ("Feed per channel".into(), self.cfg.feed_per_channel.to_string()),
+            ("Feed total".into(), self.cfg.feed_total.to_string()),
+            ("Search results".into(), self.cfg.search_limit.to_string()),
+            ("Downloads".into(), config::download_dir(&self.cfg).to_string_lossy().to_string()),
+            ("Test login".into(), "→".into()),
+            ("Import subs from account".into(), "→".into()),
+            ("Clear thumb cache".into(), "→".into()),
+        ]
+    }
+
+    pub fn settings_cycle(&mut self, idx: usize) {
+        let n = self.settings_rows().len();
+        self.settings_sel = idx.min(n.saturating_sub(1));
+        match idx {
+            0 => {
+                self.cfg.player = match self.cfg.player.as_str() {
+                    "mpv" => "iina".into(), "iina" => "vlc".into(),
+                    "vlc" => "browser".into(), _ => "mpv".into(),
+                };
+            }
+            1 => { let _ = player::cycle_quality(&mut self.cfg); }
+            2 => {
+                self.cfg.thumb_mode = match self.cfg.thumb_mode.as_str() {
+                    "auto" => "images".into(), "images" => "blocks".into(), _ => "auto".into(),
+                };
+            }
+            3 => {
+                self.cfg.thumb_quality = match self.cfg.thumb_quality.as_str() {
+                    "default" => "mq".into(), "mq" => "hq".into(),
+                    "hq" => "sd".into(), _ => "default".into(),
+                };
+                self.img_protos.clear();
+            }
+            4 => {
+                self.cfg.browser = match self.cfg.browser.as_str() {
+                    "chrome" => "firefox".into(), "firefox" => "zen".into(),
+                    "zen" => "brave".into(), "brave" => "edge".into(), _ => "chrome".into(),
+                };
+            }
+            5 => { self.cfg.use_cookies = !self.cfg.use_cookies; }
+            6 => {
+                // cycle cookies file: unset → default path → unset
+                self.cfg.cookies_file = if self.cfg.cookies_file.is_empty() {
+                    "~/.config/yt-tui/cookies.txt".into()
+                } else { String::new() };
+            }
+            7 => { self.cfg.feed_per_channel = match self.cfg.feed_per_channel { 3 => 5, 5 => 8, _ => 3 }; }
+            8 => { self.cfg.feed_total = match self.cfg.feed_total { 20 => 40, 40 => 80, _ => 20 }; }
+            9 => { self.cfg.search_limit = match self.cfg.search_limit { 12 => 24, 24 => 36, _ => 12 }; }
+            11 => { self.test_login(); config::save(&self.cfg); return; }
+            12 => { self.import_subs(); config::save(&self.cfg); return; }
+            13 => {
+                let _ = std::fs::remove_dir_all(thumb::thumb_dir());
+                self.img_protos.clear();
+                self.thumb_cache.clear();
+                self.thumb_order.clear();
+                self.status = "thumb cache cleared".into();
+            }
+            _ => {}
+        }
+        config::save(&self.cfg);
+        self.status = format!("saved config.json");
+    }
+
+    pub fn import_subs(&mut self) {
+        if self.loading { return; }
+        self.loading = true;
+        self.status = "importing subscriptions from account…".into();
+        let cfg = self.cfg.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rx_import = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(youtube::import_subscriptions(&cfg));
+        });
+    }
+
+    pub fn toggle_pause(&mut self) {
+        match player::ipc_send(r#"{"command":["cycle","pause"]}"#) {
+            Ok(_) => self.status = "mpv: play/pause toggled".into(),
+            Err(_) => self.status = "mpv not playing".into(),
+        }
+    }
+
+    pub fn next_track(&mut self) {
+        match player::ipc_send(r#"{"command":["playlist-next"]}"#) {
+            Ok(_) => self.status = "mpv: next".into(),
+            Err(_) => self.status = "mpv not playing".into(),
         }
     }
 }

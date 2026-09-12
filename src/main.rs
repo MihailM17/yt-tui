@@ -19,13 +19,18 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use app::App;
 
 fn main() -> io::Result<()> {
+    // Detect image protocol BEFORE raw mode / alternate screen: the query
+    // writes an escape to stdout and reads the terminal's reply on stdin.
+    // Failure simply means ASCII-block thumbs (still great).
+    let picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(picker);
     // behave like the app: auto-refresh subs feed on launch (background)
     app.load_feed();
     let res = run(&mut terminal, &mut app);
@@ -55,10 +60,15 @@ fn run(
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if (key.code == KeyCode::Char('q') && !app.searching && app.overlay.is_none())
+                    if (key.code == KeyCode::Char('q') && !app.searching)
                         || (key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                     {
+                        // q closes overlays first (handled in on_key); quit only when none open
+                        if key.code == KeyCode::Char('q') && app.overlay.is_some() {
+                            app.on_key(key.code, key.modifiers);
+                            continue;
+                        }
                         break;
                     }
                     app.on_key(key.code, key.modifiers);

@@ -24,8 +24,9 @@ Deps at runtime for playback (wired in `src/player.rs`):
 
 ## Keys
 
-- Mouse: click search/sidebar/videos, wheel scroll
+- Mouse-first: click search, sidebar, thumbs (again = play), chips, transport ⏸⏭, gear ⚙, overlay ✕, settings rows; wheel scrolls; hover highlights
 - `0/s/y` views • `u` login • `w/t` later/liked • `r` refresh (auto on launch) • `+` more
+- `⚙`/`,` Settings: player, quality, thumbs, browser, cookies, feeds — click/Enter, persists
 - `i` info+chapters • `c` comments • `f` sort (relevance/views/longest/shortest)
 - `a/Q/P` queue add / view / play-all (autoplay) • `d/D` download video / mp3
 - `v` quality best→720p→480p→audio • `[/]` mpv speed • `n` new-upload check • `?` help
@@ -36,7 +37,7 @@ Deps at runtime for playback (wired in `src/player.rs`):
 
 ## Login (no Google password in TUI — Google blocks it)
 
-There is no username/password login for terminals: Google requires OAuth +
+There is no username/password login for terminals (Settings → Test login / Import subs): Google requires OAuth +
 bot-checks/2FA, and `yt-dlp` removed password auth years ago. The supported
 path is cookies — the TUI never sees your password.
 
@@ -89,6 +90,7 @@ Subs are just `@handles` in config.json — `S` then `a` to add, no login needed
 - [x] live search + subs feed via yt-dlp, real thumbs via curl+jpeg, disk cache 20MB
 - [x] `yt-dlp -g` + `mpv` playback (+browser fallback), history
 - [x] queue+autoplay, downloads, sort, new-check, quality/speed
+- [x] settings menu, real image thumbs (kitty/sixel, blocks fallback), import subs from account
 - [ ] SponsorBlock skip
 - [ ] Kitty/Sixel real-image thumbs as opt-in (`--gfx kitty|sixel|blocks`)
 

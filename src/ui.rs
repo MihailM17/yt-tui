@@ -6,7 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, Overlay, SidebarAction, View};
+use crate::app::{App, Overlay, SidebarAction, TransportAction, View};
+use ratatui_image::StatefulImage;
 
 const BG: Color = Color::Rgb(10, 14, 22);
 const PANEL: Color = Color::Rgb(16, 22, 34);
@@ -159,15 +160,25 @@ fn render_header(f: &mut Frame, app: &mut App, area: Rect) {
     );
     f.render_widget(search, chunks[1]);
 
+    // clickable transport (pause/next via mpv IPC) + settings gear
+    app.transport_hits.clear();
+    let tx = chunks[2].x;
+    let ty = chunks[2].y + 1;
+    for (i, (glyph, act)) in [("⏸", TransportAction::Pause), ("⏭", TransportAction::Next)].iter().enumerate() {
+        let r = Rect { x: tx + 1 + i as u16 * 4, y: ty, width: 3, height: 1 };
+        app.transport_hits.push((r, *act));
+        f.render_widget(Paragraph::new(Span::styled(*glyph, Style::default().fg(ACCENT))), r);
+    }
+    let gr = Rect { x: tx + 10, y: ty, width: 3, height: 1 };
+    app.gear_rect = gr;
+    f.render_widget(Paragraph::new(Span::styled("⚙", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))), gr);
     let right = Paragraph::new(Line::from(vec![
-        Span::styled(" ⌕ ", Style::default().fg(ACCENT)),
-        Span::styled(" 🎙 ", Style::default().fg(DIM)),
         Span::styled("  + Create  ", Style::default().fg(Color::White)),
         Span::styled(" 🔔  ", Style::default().fg(DIM)),
         Span::styled(" ● ", Style::default().fg(Color::Yellow)),
     ]))
     .block(block(""));
-    f.render_widget(right, chunks[2]);
+    f.render_widget(right, Rect { x: tx + 13, y: chunks[2].y, width: chunks[2].width.saturating_sub(13), height: chunks[2].height });
 }
 
 fn render_chips(f: &mut Frame, app: &mut App, area: Rect) {
@@ -421,7 +432,14 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     if area.height < 10 || area.width < 20 {
         return;
     }
-    let border_col = if selected { ACCENT } else { Color::Rgb(45, 70, 100) };
+    let hovered = app.hover.map(|(hx, hy)| inside(area, hx, hy)).unwrap_or(false);
+    let border_col = if selected {
+        ACCENT
+    } else if hovered {
+        Color::Rgb(120, 170, 220)
+    } else {
+        Color::Rgb(45, 70, 100)
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_col))
@@ -437,8 +455,16 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     let info_area = chunks[1];
 
     let v = app.videos[video_idx].clone();
-    let lines = app.thumb(video_idx, thumb_area.width, thumb_area.height.saturating_sub(1));
-    f.render_widget(Paragraph::new(lines), thumb_area);
+    // real image thumbs on kitty/sixel terminals, ASCII blocks otherwise
+    let tw = thumb_area.width;
+    let th = thumb_area.height.saturating_sub(1);
+    let proto = app.img_proto(&v.id, tw, th.max(4));
+    if let Some(state) = proto {
+        f.render_stateful_widget(StatefulImage::new(), thumb_area, state);
+    } else {
+        let lines = app.thumb(video_idx, tw, th);
+        f.render_widget(Paragraph::new(lines), thumb_area);
+    }
 
     let dur = format!(" {} ", v.duration);
     let dw = dur.len() as u16;
@@ -484,13 +510,17 @@ fn render_card(f: &mut Frame, app: &mut App, area: Rect, video_idx: usize, selec
     f.render_widget(Paragraph::new(info), info_area);
 }
 
-fn render_overlay(f: &mut Frame, app: &App, area: Rect, ov: &Overlay) {
+fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
     let w = (area.width * 3 / 4).clamp(40, 110);
     let h = (area.height * 3 / 4).clamp(12, 40);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect { x, y, width: w, height: h };
     f.render_widget(ratatui::widgets::Clear, rect);
+    // clickable close button (also Esc/q)
+    let xr = Rect { x: x + w.saturating_sub(5), y, width: 4, height: 1 };
+    app.close_rect = xr;
+    f.render_widget(Paragraph::new(Span::styled(" ✕ ", Style::default().fg(Color::White).bg(Color::Rgb(150, 50, 50)).add_modifier(Modifier::BOLD))), xr);
     let (title, lines): (String, Vec<Line>) = match ov {
         Overlay::Info { vid: _, info } => {
             let mut l = vec![
@@ -526,6 +556,28 @@ fn render_overlay(f: &mut Frame, app: &App, area: Rect, ov: &Overlay) {
             }
             ("Comments  (j/k scroll • Esc close)".into(), l)
         }
+        Overlay::Settings => {
+            app.settings_hits.clear();
+            let mut l = vec![];
+            let rows = app.settings_rows();
+            for (i, (label, value)) in rows.iter().enumerate() {
+                let sel = i == app.settings_sel;
+                let rr = Rect { x: rect.x + 2, y: rect.y + 2 + i as u16, width: rect.width.saturating_sub(4), height: 1 };
+                if rr.y < rect.y + rect.height.saturating_sub(2) {
+                    app.settings_hits.push((rr, i));
+                }
+                let val_style = if value == "→" { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) }
+                    else { Style::default().fg(Color::Rgb(150, 220, 150)) };
+                l.push(Line::from(vec![
+                    Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { Color::White } else { DIM })),
+                    Span::styled(format!("{label:<18}"), Style::default().fg(if sel { Color::White } else { DIM }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                    Span::styled(value.clone(), val_style),
+                ]));
+            }
+            l.push(Line::from(Span::raw("")));
+            l.push(Line::from(Span::styled("Enter/click changes • saved to config.json", Style::default().fg(DIM))));
+            ("Settings  (click or j/k + Enter • Esc closes)".into(), l)
+        }
         Overlay::Queue => {
             let mut l = vec![];
             if app.queue.is_empty() {
@@ -548,7 +600,8 @@ fn render_overlay(f: &mut Frame, app: &App, area: Rect, ov: &Overlay) {
                 ("i/c", "info+chapters / comments overlay"), ("a/Q/P", "queue add / view / play all"),
                 ("d/D", "download video / audio mp3"), ("v", "quality best→720p→480p→audio"),
                 ("[/]", "mpv speed -/+ (while playing)"), ("r/+", "refresh / load more"),
-                ("mouse", "click search, sidebar, videos; wheel scrolls"),
+                ("mouse", "click everything: search, sidebar, thumbs, settings"),
+                (",/space", "settings • pause mpv"),
             ];
             // (label, desc) pairs rendered simply
             let mut l = vec![];
@@ -577,6 +630,10 @@ fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     chars[..max - 1].iter().collect::<String>() + "…"
+}
+
+fn inside(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
 fn block(title: &str) -> Block<'_> {

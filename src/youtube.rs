@@ -361,7 +361,7 @@ pub fn _timeout() -> Duration {
 // Info + comments (background threads; ~1MB info.json for comments, parsed+deleted)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VideoInfo {
     pub title: String,
     pub channel: String,
@@ -373,7 +373,7 @@ pub struct VideoInfo {
     pub chapters: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Comment {
     pub author: String,
     pub text: String,
@@ -457,5 +457,57 @@ pub fn video_comments(video_id: &str, max: usize) -> Result<Vec<Comment>, String
         }
     }
     if out.is_empty() { return Err("comments disabled for this video".into()); }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Import channel list from the logged-in account (fixes "missing subs").
+// Manual config subs only cover what you typed; this merges every channel
+// YouTube itself lists under feed/subscriptions (needs cookies).
+// Returns deduplicated @handles / channel URLs ready for config.
+// ---------------------------------------------------------------------------
+
+pub fn import_subscriptions(cfg: &config::Config) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        "--flat-playlist".to_string(),
+        "-J".to_string(),
+        "--no-warnings".to_string(),
+    ];
+    // cookies required: file wins, else browser
+    if !cfg.cookies_file.is_empty() {
+        let p = shellexpand(&cfg.cookies_file);
+        if !std::path::Path::new(&p).exists() {
+            return Err(format!("cookies_file not found: {p}"));
+        }
+        args.push("--cookies".to_string());
+        args.push(p);
+    } else if !cfg.browser.is_empty() {
+        args.push("--cookies-from-browser".to_string());
+        args.push(browser_spec(&cfg.browser));
+    } else {
+        return Err("no login configured — set browser/coookies_file in Settings".into());
+    }
+    args.push("--playlist-end".to_string());
+    args.push("60".to_string());
+    args.push("https://www.youtube.com/feed/subscriptions".to_string());
+    let raw = run_ytdlp(&args).map_err(|e| format!("{e} — login first (Settings → Test login)"))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("parse subs: {e}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = vec![];
+    if let Some(arr) = v.get("entries").and_then(|e| e.as_array()) {
+        for e in arr {
+            // prefer @handle (stable, readable), else channel URL
+            let handle = e.get("uploader_id").and_then(|x| x.as_str()).unwrap_or("");
+            let curl = e.get("channel_url").and_then(|x| x.as_str()).unwrap_or("");
+            let chid = e.get("channel_id").and_then(|x| x.as_str()).unwrap_or("");
+            let cand = if handle.starts_with('@') { handle.to_string() }
+                else if !curl.is_empty() { curl.to_string() }
+                else if !chid.is_empty() { format!("https://www.youtube.com/channel/{chid}") }
+                else { continue };
+            if seen.insert(cand.clone()) { out.push(cand); }
+        }
+    }
+    if out.is_empty() { return Err("no channels found — cookies may lack a login".into()); }
     Ok(out)
 }

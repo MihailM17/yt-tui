@@ -1,18 +1,21 @@
 [package]
 name = "yt-tui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Lightweight terminal YouTube client (ratatui + mpv + yt-dlp). ASCII thumbs, no browser."
+description = "Lightweight terminal YouTube client (ratatui + mpv + yt-dlp). Image/ASCII thumbs, no browser."
 license = "MIT"
 
 [dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# JPEG-only decode for real thumbs (no png/webp bloat). No TLS in binary:
-# thumbnails + RSS fetched via system `curl`, search via `yt-dlp -J`.
+# JPEG-only decode for thumbs (no png/webp bloat). No TLS in binary:
+# thumbnails fetched via system `curl`, search via `yt-dlp -J`.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Real image thumbs (kitty/sixel) with halfblock fallback. No default features
+# (skips chafa/pkg-config system deps); we decode with our own `image` crate.
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 
 [profile.release]
 opt-level = "z"
