@@ -1,5 +1,7 @@
-//! Color schemes. Names taken from the Omarchy theme list
+//! Color schemes. Most names taken from the Omarchy theme list
 //! (omarchy.org/themes); hex values mapped to the TUI palette slots.
+//! "YouTube Dark" / "YouTube Light" match youtube.com's classic colors
+//! (brand red #FF0000 on #0F0F0F dark / #FFFFFF light).
 //!
 //! Switch live in Settings → Style (click/Enter). Persisted in config.json.
 
@@ -34,6 +36,8 @@ pub const NAMES: &[&str] = &[
     "Osaka Jade",
     "Rosé Pine",
     "Ristretto",
+    "YouTube Dark",
+    "YouTube Light",
 ];
 
 pub fn get(name: &str) -> Theme {
@@ -137,6 +141,26 @@ pub fn get(name: &str) -> Theme {
             sel: rgb(0x3d, 0x32, 0x30),
             border: rgb(0x57, 0x45, 0x3d),
             fg: rgb(0xec, 0xe0, 0xd1),
+        },
+        "YouTube Dark" => Theme {
+            bg: rgb(0x0f, 0x0f, 0x0f),
+            panel: rgb(0x21, 0x21, 0x21),
+            accent: rgb(0xff, 0x00, 0x00),
+            dim: rgb(0xaa, 0xaa, 0xaa),
+            chip: rgb(0x27, 0x27, 0x27),
+            sel: rgb(0x3d, 0x3d, 0x3d),
+            border: rgb(0x30, 0x30, 0x30),
+            fg: rgb(0xf1, 0xf1, 0xf1),
+        },
+        "YouTube Light" => Theme {
+            bg: rgb(0xff, 0xff, 0xff),
+            panel: rgb(0xf2, 0xf2, 0xf2),
+            accent: rgb(0xff, 0x00, 0x00),
+            dim: rgb(0x60, 0x60, 0x60),
+            chip: rgb(0xe5, 0xe5, 0xe5),
+            sel: rgb(0xd9, 0xd9, 0xd9),
+            border: rgb(0xcc, 0xcc, 0xcc),
+            fg: rgb(0x0f, 0x0f, 0x0f),
         },
         // Midnight: yt-tui default
         _ => Theme {

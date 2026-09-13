@@ -1,39 +1,65 @@
 //! Screenshot harness: renders real UI frames headlessly (mock data, offline)
 //! and dumps cell grids as JSON for PNG rasterizing.
 //!
+//! NOTE: docs/*.png are real terminal captures. Point rasterize at a scratch
+//! dir so mock previews never overwrite them.
+//!
 //! ```bash
 //! cargo run --example shots > /tmp/shots.json
-//! python3 docs/rasterize.py /tmp/shots.json docs/
+//! python3 docs/rasterize.py /tmp/shots.json /tmp/mockshots/
 //! ```
 
 use ratatui::{backend::TestBackend, Terminal};
 use yt_tui::app::{App, Overlay};
 
 fn main() {
+    // One theme per image (no duplicates) so the README shows the range:
+    // Midnight + YouTube Dark/Light + Gruvbox.
     let shots = vec![
         ("home-midnight", "Midnight", "home"),
-        ("home-tokyonight", "Tokyo Night", "home"),
-        ("settings", "Midnight", "settings"),
-        ("actions", "Gruvbox", "actions"),
+        ("home-youtube-dark", "YouTube Dark", "home"),
+        ("settings-youtube-light", "YouTube Light", "settings"),
+        ("actions-gruvbox", "Gruvbox", "actions"),
     ];
     println!("{{");
     for (i, (name, theme, scene)) in shots.iter().enumerate() {
         let mut app = App::new(None);
         app.cfg.theme = theme.to_string();
+        // Mirror a lived-in sidebar (same density as a real config).
         app.subs = vec![
             ("@ScrapMan".into(), true),
             ("@Grian".into(), true),
             ("@kanGaming".into(), false),
             ("@LoserfruitDaily".into(), false),
             ("@TheClashersGaming".into(), false),
-            ("@AethelthrythGaming".into(), false),
+            ("@scrapman".into(), false),
+            ("@AethelthrythGaming".into(), true),
+            ("@AethelthrythClips".into(), false),
+            ("@ludwig".into(), false),
+            ("@Valkyrae".into(), false),
+            ("@DangerouslyFunny".into(), false),
+            ("@techlinked".into(), false),
+            ("@OtzStreams".into(), false),
+            ("@impulseSV2".into(), false),
+            ("@ShortCircuit".into(), false),
+            ("@techquickie".into(), false),
+            ("@MarcoMeatball".into(), false),
+            ("@xisumavoid".into(), false),
+            ("@Sinvicta".into(), false),
             ("@LinusTechTips".into(), true),
+            ("@jacksepticeye".into(), false),
+            ("@GameLinked".into(), false),
+            ("@SourceMaster".into(), true),
+            ("@SmallishBeans".into(), false),
         ];
         app.live = true; // demo data; badge reads LIVE
         app.cols = 3;
         match *scene {
             "settings" => {
                 app.overlay = Some(Overlay::Settings);
+                // Showcase the new mouse dropdown: Style expanded.
+                app.settings_sel = 4;
+                app.settings_open = Some(4);
             }
             "actions" => {
                 app.selected = 1;
@@ -41,7 +67,8 @@ fn main() {
             }
             _ => {}
         }
-        let backend = TestBackend::new(140, 40);
+        // 180 cols: real 3-column grid (render_grid needs >= 150 for 3).
+        let backend = TestBackend::new(180, 44);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| yt_tui::ui::render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer().clone();

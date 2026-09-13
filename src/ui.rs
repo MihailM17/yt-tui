@@ -556,7 +556,12 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect { x, y, width: w, height: h };
     f.render_widget(ratatui::widgets::Clear, rect);
-    // clickable close button (also Esc/q)
+    // Shared hit-state for mouse: dialog rect (outside-click closes),
+    // ✕ button, footer [ Close ], dropdown option hits.
+    app.overlay_rect = rect;
+    app.overlay_footer_rect = Rect::default();
+    app.settings_opt_hits.clear();
+    // clickable close button (also Esc/q, click-outside, footer button)
     let xr = Rect { x: x + w.saturating_sub(5), y, width: 4, height: 1 };
     app.close_rect = xr;
     f.render_widget(Paragraph::new(Span::styled(" ✕ ", Style::default().fg(th.fg).bg(Color::Rgb(150, 50, 50)).add_modifier(Modifier::BOLD))), xr);
@@ -597,7 +602,7 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
                     // screen row of this line, scroll-aware
                     let sy = (first_row + k) as i32 - app.overlay_scroll as i32;
                     if sy >= 0 {
-                        let rr = Rect { x: rect.x + 2, y: rect.y + 2 + sy as u16, width: rect.width.saturating_sub(4), height: 1 };
+                        let rr = Rect { x: rect.x + 1, y: rect.y + 1 + sy as u16, width: rect.width.saturating_sub(2), height: 1 };
                         if rr.y > rect.y && rr.y < rect.y + rect.height.saturating_sub(1) {
                             app.info_hits.push((rr, k));
                         }
@@ -620,25 +625,89 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
         }
         Overlay::Settings => {
             app.settings_hits.clear();
-            let mut l = vec![];
+            // (settings_opt_hits already cleared at overlay top.)
+            let mut l: Vec<Line> = vec![];
             let rows = app.settings_rows();
+            let open = app.settings_open;
+            let scroll = app.overlay_scroll as u16;
+            // Track screen rects scroll-aware: screen_y = rect.y + 1 + line_idx - scroll
+            // (+1: Paragraph content starts inside the block border).
+            let push_hit = |app: &mut App, line_idx: usize, idx: usize| {
+                let sy = rect.y as i32 + 1 + line_idx as i32 - scroll as i32;
+                if sy > rect.y as i32 && sy < rect.y as i32 + rect.height as i32 - 1 {
+                    let rr = Rect { x: rect.x + 1, y: sy as u16, width: rect.width.saturating_sub(2), height: 1 };
+                    app.settings_hits.push((rr, idx));
+                }
+            };
+            let push_opt_hit = |app: &mut App, line_idx: usize, row: usize, opt: usize| {
+                let sy = rect.y as i32 + 1 + line_idx as i32 - scroll as i32;
+                if sy > rect.y as i32 && sy < rect.y as i32 + rect.height as i32 - 1 {
+                    let rr = Rect { x: rect.x + 1, y: sy as u16, width: rect.width.saturating_sub(2), height: 1 };
+                    app.settings_opt_hits.push((rr, row, opt));
+                }
+            };
             for (i, (label, value)) in rows.iter().enumerate() {
                 let sel = i == app.settings_sel;
-                let rr = Rect { x: rect.x + 2, y: rect.y + 2 + i as u16, width: rect.width.saturating_sub(4), height: 1 };
-                if rr.y < rect.y + rect.height.saturating_sub(2) {
-                    app.settings_hits.push((rr, i));
-                }
+                let has_drop = app.settings_has_dropdown(i);
+                let arrow = if has_drop {
+                    if open == Some(i) { " ▴" } else { " ▾" }
+                } else {
+                    ""
+                };
                 let val_style = if value == "→" { Style::default().fg(th.accent).add_modifier(Modifier::BOLD) }
                     else { Style::default().fg(Color::Rgb(150, 220, 150)) };
+                let line_idx = l.len();
                 l.push(Line::from(vec![
                     Span::styled(format!("{} ", if sel { "▶" } else { " " }), Style::default().fg(if sel { th.fg } else { th.dim })),
                     Span::styled(format!("{label:<18}"), Style::default().fg(if sel { th.fg } else { th.dim }).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
                     Span::styled(value.clone(), val_style),
+                    Span::styled(arrow, Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
                 ]));
+                push_hit(app, line_idx, i);
+                // Expanded dropdown options (mouse-clickable).
+                if open == Some(i) {
+                    let opts = app.settings_options(i);
+                    for (oj, opt) in opts.iter().enumerate() {
+                        let is_cur = if i == 2 {
+                            // Thumbnails display is "mode (graphics)".
+                            value.starts_with(opt.as_str())
+                        } else {
+                            value == opt
+                        };
+                        let o_idx = l.len();
+                        l.push(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(
+                                if is_cur { "● " } else { "○ " },
+                                Style::default().fg(if is_cur { th.accent } else { th.dim }).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                opt.clone(),
+                                Style::default()
+                                    .fg(if is_cur { th.fg } else { th.dim })
+                                    .bg(if is_cur { th.sel } else { th.panel })
+                                    .add_modifier(if is_cur { Modifier::BOLD } else { Modifier::empty() }),
+                            ),
+                        ]));
+                        push_opt_hit(app, o_idx, i, oj);
+                    }
+                }
             }
             l.push(Line::from(Span::raw("")));
-            l.push(Line::from(Span::styled("Enter/click changes • saved to config.json", Style::default().fg(th.dim))));
-            ("Settings  (click or j/k + Enter • Esc closes)".into(), l)
+            l.push(Line::from(Span::styled("Click a row to open its dropdown, click an option to pick it • Enter also cycles • saved to config.json", Style::default().fg(th.dim))));
+            let close_idx = l.len();
+            l.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(" [ Close ] ", Style::default().fg(th.fg).bg(th.chip).add_modifier(Modifier::BOLD)),
+                Span::styled("  or click ✕ / outside, or Esc", Style::default().fg(th.dim)),
+            ]));
+            {
+                let sy = rect.y as i32 + 1 + close_idx as i32 - scroll as i32;
+                if sy > rect.y as i32 && sy < rect.y as i32 + rect.height as i32 - 1 {
+                    app.overlay_footer_rect = Rect { x: rect.x + 1, y: sy as u16, width: rect.width.saturating_sub(2), height: 1 };
+                }
+            }
+            ("Settings  (dropdowns • ✕ / outside / [ Close ] closes)".into(), l)
         }
         Overlay::Actions { .. } => {
             app.settings_hits.clear();
@@ -646,7 +715,7 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
             let rows = app.action_rows();
             for (i, (label, value)) in rows.iter().enumerate() {
                 let sel = i == app.settings_sel;
-                let rr = Rect { x: rect.x + 2, y: rect.y + 2 + i as u16, width: rect.width.saturating_sub(4), height: 1 };
+                let rr = Rect { x: rect.x + 1, y: rect.y + 1 + i as u16, width: rect.width.saturating_sub(2), height: 1 };
                 if rr.y < rect.y + rect.height.saturating_sub(2) {
                     app.settings_hits.push((rr, i));
                 }
@@ -690,7 +759,21 @@ fn render_overlay(f: &mut Frame, app: &mut App, area: Rect, ov: &Overlay) {
             let mut l = vec![];
             for (k, d) in rows { l.push(Line::from(vec![Span::styled(format!("{k:8}"), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(d, Style::default().fg(th.fg))])); }
             let _ = &rows;
-            ("Help  (? or Esc close)".into(), l)
+            l.push(Line::from(Span::raw("")));
+            let close_idx = l.len();
+            l.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(" [ Close ] ", Style::default().fg(th.fg).bg(th.chip).add_modifier(Modifier::BOLD)),
+                Span::styled("  or click ✕ / outside, or Esc", Style::default().fg(th.dim)),
+            ]));
+            {
+                let scroll = app.overlay_scroll as u16;
+                let sy = rect.y as i32 + 1 + close_idx as i32 - scroll as i32;
+                if sy > rect.y as i32 && sy < rect.y as i32 + rect.height as i32 - 1 {
+                    app.overlay_footer_rect = Rect { x: rect.x + 1, y: sy as u16, width: rect.width.saturating_sub(2), height: 1 };
+                }
+            }
+            ("Help  (✕ / outside / [ Close ] closes)".into(), l)
         }
     };
     let scroll = app.overlay_scroll as u16;
@@ -721,4 +804,107 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
 
 fn block<'a>(title: &'a str, th: &Theme) -> Block<'a> {
     Block::default().title(title).style(Style::default().bg(th.bg))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    use crate::app::{App, Overlay};
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let w = buf.area.width as usize;
+        buf.content[y as usize * w..(y as usize + 1) * w]
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) -> Buffer {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn test_app() -> App {
+        let mut app = App::new(None);
+        // deterministic rows regardless of the dev machine's config.json
+        app.cfg = crate::config::Config::default();
+        app
+    }
+
+    #[test]
+    fn settings_hits_align_with_visible_rows() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Settings);
+        app.settings_open = None;
+        app.overlay_scroll = 0;
+        let buf = render(&mut app, 140, 40);
+        let rows = app.settings_rows();
+        assert!(!app.settings_hits.is_empty());
+        for (rect, idx) in app.settings_hits.clone() {
+            let text = row_text(&buf, rect.y);
+            let label = rows[idx].0.clone();
+            assert!(
+                text.contains(label.trim()),
+                "settings hit {idx} ({label:?}) lands on y={} {text:?}",
+                rect.y
+            );
+        }
+    }
+
+    #[test]
+    fn dropdown_option_hits_align_with_visible_options() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Settings);
+        app.settings_sel = 4;
+        app.settings_open = Some(4); // Style dropdown
+        app.overlay_scroll = 0;
+        let buf = render(&mut app, 140, 40);
+        assert!(!app.settings_opt_hits.is_empty());
+        for (rect, row, opt) in app.settings_opt_hits.clone() {
+            let want = app.settings_options(row)[opt].clone();
+            let text = row_text(&buf, rect.y);
+            assert!(
+                text.contains(&want),
+                "option hit ({row},{opt}) ({want:?}) lands on y={} {text:?}",
+                rect.y
+            );
+        }
+    }
+
+    #[test]
+    fn help_footer_hit_says_close() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Help);
+        app.overlay_scroll = 0;
+        let buf = render(&mut app, 140, 40);
+        let r = app.overlay_footer_rect;
+        assert!(r.height == 1 && r.width > 0, "help footer hit missing");
+        assert!(
+            row_text(&buf, r.y).contains("Close"),
+            "help footer hit lands on y={} {:?}",
+            r.y,
+            row_text(&buf, r.y)
+        );
+    }
+
+    #[test]
+    fn closing_overlay_restores_background_buffer() {
+        let mut app = test_app();
+        let plain = render(&mut app, 140, 40);
+        app.overlay = Some(Overlay::Settings);
+        app.settings_open = Some(4);
+        let _ = render(&mut app, 140, 40);
+        app.overlay = None;
+        app.settings_open = None;
+        let restored = render(&mut app, 140, 40);
+        assert_eq!(
+            plain.content, restored.content,
+            "background buffer differs after overlay open→close"
+        );
+    }
 }

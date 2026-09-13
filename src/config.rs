@@ -68,7 +68,7 @@ pub struct Config {
     /// English subtitles when available (mpv ytdl subs).
     #[serde(default)]
     pub subtitles: bool,
-    /// Color scheme (Settings → Style). Names from the Omarchy theme list.
+    /// Color scheme (Settings → Style). 11 Omarchy themes + YouTube Dark/Light.
     #[serde(default = "default_theme")]
     pub theme: String,
 }

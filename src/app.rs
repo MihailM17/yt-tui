@@ -122,6 +122,14 @@ pub struct App {
     img_protos: std::collections::HashMap<String, StatefulProtocol>,
     pub settings_sel: usize,
     pub settings_hits: Vec<(Rect, usize)>,
+    /// Which settings row has its dropdown expanded (mouse). None = all closed.
+    pub settings_open: Option<usize>,
+    /// Hit rects for dropdown options: (rect, row_idx, opt_idx).
+    pub settings_opt_hits: Vec<(Rect, usize, usize)>,
+    /// Full overlay rect (for outside-click-to-close).
+    pub overlay_rect: Rect,
+    /// Footer "[ Close ]" button rect inside Settings/Help overlays.
+    pub overlay_footer_rect: Rect,
     pub close_rect: Rect,
     pub gear_rect: Rect,
     pub transport_hits: Vec<(Rect, TransportAction)>,
@@ -210,6 +218,10 @@ impl App {
             img_protos: std::collections::HashMap::new(),
             settings_sel: 0,
             settings_hits: vec![],
+            settings_open: None,
+            settings_opt_hits: vec![],
+            overlay_rect: Rect::default(),
+            overlay_footer_rect: Rect::default(),
             close_rect: Rect::default(),
             gear_rect: Rect::default(),
             transport_hits: vec![],
@@ -656,20 +668,33 @@ impl App {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let (x, y) = (ev.column, ev.row);
-                if inside(self.search_rect, x, y) {
+                // Any overlay: ✕ button, footer [ Close ], or click-outside closes.
+                if self.overlay.is_some() {
+                    if inside(self.close_rect, x, y) {
+                        self.close_overlay();
+                        return;
+                    }
+                    if inside(self.overlay_footer_rect, x, y) {
+                        self.close_overlay();
+                        return;
+                    }
+                    if !inside(self.overlay_rect, x, y) {
+                        // Clicked the dimmed background behind the dialog.
+                        // (Search bar keeps working only when no overlay is open.)
+                        self.close_overlay();
+                        return;
+                    }
+                }
+                if inside(self.search_rect, x, y) && self.overlay.is_none() {
                     self.searching = true;
                     self.adding_sub = false;
-                    return;
-                }
-                if inside(self.close_rect, x, y) && self.overlay.is_some() {
-                    self.overlay = None;
-                    self.overlay_scroll = 0;
                     return;
                 }
                 if inside(self.gear_rect, x, y) {
                     self.overlay = Some(Overlay::Settings);
                     self.overlay_scroll = 0;
                     self.settings_sel = 0;
+                    self.settings_open = None;
                     return;
                 }
                 for (rect, act) in self.transport_hits.clone() {
@@ -682,13 +707,27 @@ impl App {
                     }
                 }
                 if self.overlay == Some(Overlay::Settings) {
-                    for (rect, idx) in self.settings_hits.clone() {
+                    // Dropdown options first (they sit below their row header).
+                    for (rect, row, opt) in self.settings_opt_hits.clone() {
                         if inside(rect, x, y) {
-                            self.settings_sel = idx;
-                            self.settings_cycle(idx);
+                            self.settings_apply_option(row, opt);
                             return;
                         }
                     }
+                    for (rect, idx) in self.settings_hits.clone() {
+                        if inside(rect, x, y) {
+                            self.settings_sel = idx;
+                            self.settings_click(idx);
+                            return;
+                        }
+                    }
+                    // Click inside the dialog but not on a row: swallow
+                    // (don't let it fall through to the feed behind).
+                    return;
+                }
+                if self.overlay == Some(Overlay::Help) {
+                    // Help has ✕ / footer / outside-click to close (handled
+                    // above). Swallow any other click inside the dialog.
                     return;
                 }
                 if matches!(self.overlay, Some(Overlay::Info { .. })) {
@@ -708,6 +747,13 @@ impl App {
                             return;
                         }
                     }
+                    return;
+                }
+                if self.overlay.is_some() {
+                    // Comments / Queue (and any other dialog): the click is
+                    // inside the dialog (outside clicks already closed it
+                    // above), so swallow it — the feed behind must never
+                    // react to dialog clicks.
                     return;
                 }
                 for (rect, a) in self.sidebar_hits.clone() {
@@ -776,18 +822,32 @@ impl App {
                 }
             }
             MouseEventKind::Moved => { self.hover = Some((ev.column, ev.row)); }
-            MouseEventKind::ScrollUp => match self.view {
-                View::Home | View::Subs => self.move_sel(-(self.cols as isize)),
-                View::Playlists => self.move_pl(-1),
-                View::Downloads => self.move_dl(-1),
-                View::History => self.move_hist(-1),
-            },
-            MouseEventKind::ScrollDown => match self.view {
-                View::Home | View::Subs => self.move_sel(self.cols as isize),
-                View::Playlists => self.move_pl(1),
-                View::Downloads => self.move_dl(1),
-                View::History => self.move_hist(1),
-            },
+            MouseEventKind::ScrollUp => {
+                // A wheel over an open dialog scrolls the dialog, never the
+                // feed behind it (which used to jump selection under menus).
+                if self.overlay.is_some() {
+                    self.overlay_scroll = self.overlay_scroll.saturating_sub(1);
+                } else {
+                    match self.view {
+                        View::Home | View::Subs => self.move_sel(-(self.cols as isize)),
+                        View::Playlists => self.move_pl(-1),
+                        View::Downloads => self.move_dl(-1),
+                        View::History => self.move_hist(-1),
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.overlay.is_some() {
+                    self.overlay_scroll += 1;
+                } else {
+                    match self.view {
+                        View::Home | View::Subs => self.move_sel(self.cols as isize),
+                        View::Playlists => self.move_pl(1),
+                        View::Downloads => self.move_dl(1),
+                        View::History => self.move_hist(1),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -817,7 +877,15 @@ impl App {
             let is_settings = matches!(self.overlay, Some(Overlay::Settings));
             let is_actions = matches!(self.overlay, Some(Overlay::Actions { .. }));
             match code {
-                KeyCode::Esc | KeyCode::Char('q') => { self.overlay = None; self.overlay_scroll = 0; return; }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    // Esc first collapses an open dropdown, second press closes.
+                    if is_settings && self.settings_open.is_some() {
+                        self.settings_open = None;
+                        return;
+                    }
+                    self.close_overlay();
+                    return;
+                }
                 KeyCode::Char('j') | KeyCode::Down => {
                     if is_settings {
                         let n = self.settings_rows().len();
@@ -1055,7 +1123,7 @@ impl App {
             }
             KeyCode::Char('[') => self.nudge_speed(-1.0),
             KeyCode::Char(']') => self.nudge_speed(1.0),
-            KeyCode::Char(',') => { self.overlay = Some(Overlay::Settings); self.overlay_scroll = 0; self.settings_sel = 0; }
+            KeyCode::Char(',') => { self.overlay = Some(Overlay::Settings); self.overlay_scroll = 0; self.settings_sel = 0; self.settings_open = None; }
             KeyCode::Char(' ') => self.toggle_pause(),
             KeyCode::Char('>') => self.next_track(),
             KeyCode::Char('z') => self.cycle_sleep(),
@@ -1805,9 +1873,90 @@ impl App {
         ]
     }
 
+    /// Dropdown options for a settings row (mouse). Empty = no dropdown:
+    /// row toggles / runs directly on click instead.
+    pub fn settings_options(&self, idx: usize) -> Vec<String> {
+        match idx {
+            0 => vec!["mpv".into(), "iina".into(), "vlc".into(), "browser".into()],
+            1 => vec!["best".into(), "720p".into(), "480p".into(), "audio".into()],
+            2 => vec!["auto".into(), "images".into(), "blocks".into()],
+            3 => vec!["default".into(), "mq".into(), "hq".into(), "sd".into()],
+            4 => theme::NAMES.iter().map(|s| s.to_string()).collect(),
+            5 => vec![
+                "chrome".into(),
+                "chromium".into(),
+                "brave".into(),
+                "edge".into(),
+                "firefox".into(),
+                "zen".into(),
+                "safari".into(),
+            ],
+            8 => vec!["3".into(), "5".into(), "8".into()],
+            9 => vec!["20".into(), "40".into(), "80".into()],
+            10 => vec!["12".into(), "24".into(), "36".into()],
+            _ => vec![],
+        }
+    }
+
+    pub fn settings_has_dropdown(&self, idx: usize) -> bool {
+        !self.settings_options(idx).is_empty()
+    }
+
+    /// Apply a dropdown option (mouse), persist, keep selection on the row.
+    pub fn settings_apply_option(&mut self, row: usize, opt: usize) {
+        let opts = self.settings_options(row);
+        let Some(val) = opts.get(opt).cloned() else { return };
+        self.settings_sel = row;
+        match row {
+            0 => self.cfg.player = val,
+            1 => self.cfg.quality = val,
+            2 => self.cfg.thumb_mode = val,
+            3 => {
+                self.cfg.thumb_quality = val;
+                self.img_protos.clear();
+            }
+            4 => self.cfg.theme = val,
+            5 => self.cfg.browser = val,
+            8 => self.cfg.feed_per_channel = val.parse().unwrap_or(5),
+            9 => self.cfg.feed_total = val.parse().unwrap_or(40),
+            10 => self.cfg.search_limit = val.parse().unwrap_or(24),
+            _ => return,
+        }
+        self.settings_open = None;
+        config::save(&self.cfg);
+        self.status = "saved config.json".into();
+    }
+
+    /// Mouse click on a settings row header: toggle dropdown if the row
+    /// has one, otherwise fall back to the classic cycle/run behaviour.
+    /// Returns true if the click was fully handled (no further action).
+    pub fn settings_click(&mut self, idx: usize) -> bool {
+        // Footer close row is handled by the caller (idx == rows.len()).
+        if self.settings_has_dropdown(idx) {
+            if self.settings_open == Some(idx) {
+                self.settings_open = None;
+            } else {
+                self.settings_open = Some(idx);
+                self.settings_sel = idx;
+            }
+            return true;
+        }
+        self.settings_open = None;
+        self.settings_cycle(idx);
+        true
+    }
+
+    /// Close any open overlay + reset dropdown/scroll state.
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.overlay_scroll = 0;
+        self.settings_open = None;
+    }
+
     pub fn settings_cycle(&mut self, idx: usize) {
         let n = self.settings_rows().len();
         self.settings_sel = idx.min(n.saturating_sub(1));
+        self.settings_open = None;
         match idx {
             0 => {
                 self.cfg.player = match self.cfg.player.as_str() {
@@ -1833,8 +1982,10 @@ impl App {
             }
             5 => {
                 self.cfg.browser = match self.cfg.browser.as_str() {
-                    "chrome" => "firefox".into(), "firefox" => "zen".into(),
-                    "zen" => "brave".into(), "brave" => "edge".into(), _ => "chrome".into(),
+                    "chrome" => "chromium".into(), "chromium" => "brave".into(),
+                    "brave" => "edge".into(), "edge" => "firefox".into(),
+                    "firefox" => "zen".into(), "zen" => "safari".into(),
+                    _ => "chrome".into(),
                 };
             }
             6 => { self.cfg.use_cookies = !self.cfg.use_cookies; }

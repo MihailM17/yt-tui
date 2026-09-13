@@ -3,17 +3,17 @@
 No browser. No ads. A single **1.2MB** binary idling at **~15MB RAM** (browser YouTube: 500MB+).
 
 ![Home feed](docs/home-midnight.png)
-*Home feed (Midnight theme) — click any thumbnail, mouse or keyboard.*
+*Home feed (Midnight theme) — real Ghostty screenshot with image thumbnails. Click any thumbnail, mouse or keyboard.*
 
 ## Why
 
 - **Lightweight** — Rust + ratatui, no webview, no Electron. Works over SSH.
 - **Full YouTube layout** — Home and Subscriptions pages, search, playlists, history, Watch Later, comments, queue with autoplay.
 - **Mouse-first, keyboard-fast** — click everything; `hjkl` + shortcuts for the rest.
-- **Pretty** — real image thumbnails on Kitty/Ghostty/WezTerm (ASCII-art fallback everywhere), **11 Omarchy themes** in Settings → Style:
+- **Pretty** — real image thumbnails on Kitty/Ghostty/WezTerm (ASCII-art fallback everywhere), **13 themes** in Settings → Style (11 Omarchy + YouTube Dark/Light):
 
-![Tokyo Night theme](docs/home-tokyonight.png)
-*Same feed, Tokyo Night — 11 Omarchy themes in Settings → Style.*
+![YouTube Dark theme](docs/home-youtube-dark.png)
+*Same feed, YouTube Dark — 13 themes in Settings → Style.*
 
 ## Install
 
@@ -28,13 +28,15 @@ cargo install --path .   # then run `yt-tui` from anywhere
 
 `yt-tui` — Home loads on launch. `/` searches, `Enter` plays in mpv (ad-free), `q` quits. Press `?` in-app for all keys.
 
-![Settings](docs/settings.png)
-*Everything is configurable without touching JSON — click or Enter a row.*
+![Playlists](docs/playlists-tokyonight.png)
+*Playlists view (Tokyo Night theme) — hover videos in Home, `a` adds to the queue, `s` here saves it as a playlist.*
+
+*Settings (gear icon / `,`) configures everything without touching JSON — click a row for its dropdown, or Enter to cycle. ✕ / [ Close ] / click-outside closes.*
 
 **Login (for likes, subscriptions, Watch Later):** Google blocks terminal passwords, so export `cookies.txt` ( extension while on youtube.com) → Settings → Cookies file → Test login. History, search, and public feeds need no login.
 
-![Action menu: like, subscribe, save](docs/actions.png)
-*Right-click (or `x`) any video: like, subscribe, save to Watch Later, download.*
+![Downloads](docs/downloads-youtube-light.png)
+*Downloads view (YouTube Light theme) — `d` on a Home video saves it here, `Enter` plays. Each screenshot here uses a different theme (Midnight / YouTube Dark / Tokyo Night / YouTube Light).*
 
 Right-click (or `x`) any video for like / subscribe / save / download.
 
@@ -51,7 +53,9 @@ No shell calls (argv-only subprocesses), video IDs validated at parse, thumbnail
 ```bash
 cargo run --release
 cargo test
-cargo run --example shots > /tmp/shots.json && python3 docs/rasterize.py /tmp/shots.json docs/
+# NOTE: docs/*.png are real terminal captures — do NOT overwrite them with
+# the mock pipeline below (it renders offline mock data for layout checks).
+cargo run --example shots > /tmp/shots.json && python3 docs/rasterize.py /tmp/shots.json /tmp/mockshots/
 ```
 
 MIT.
