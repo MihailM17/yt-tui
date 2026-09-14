@@ -3,7 +3,7 @@
 No browser. No ads. A single **1.2MB** binary idling at **~15MB RAM** (browser YouTube: 500MB+).
 
 ![Home feed](docs/home-midnight.png)
-*Home feed (Midnight theme) — real Ghostty screenshot with image thumbnails. Click any thumbnail, mouse or keyboard.*
+*Home feed (Nord theme) — real Ghostty screenshot with image thumbnails. Click any thumbnail, mouse or keyboard.*
 
 ## Why
 
